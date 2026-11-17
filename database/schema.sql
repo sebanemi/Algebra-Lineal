@@ -1,21 +1,37 @@
 -- =============================================================================
--- Esquema Relacional de Base de Datos (3FN) - Sistema de Análisis Lineal LPF
+-- Esquema Relacional de Base de Datos (3FN) - Sistema Multi-Liga de Análisis Lineal
 -- Motor: SQLite3 con soporte de concurrencia Write-Ahead Logging (WAL)
 -- =============================================================================
 
 PRAGMA foreign_keys = ON;
-PRAGMA journal_mode = WAL;
 PRAGMA synchronous = NORMAL;
 
--- 1. Tabla de Equipos de la Liga Profesional
+-- 0. Tabla de Ligas y Competiciones (Multi-Liga)
+CREATE TABLE IF NOT EXISTS competitions (
+    competition_id INTEGER PRIMARY KEY,
+    code TEXT NOT NULL UNIQUE,
+    name TEXT NOT NULL,
+    short_name TEXT NOT NULL,
+    country TEXT NOT NULL,
+    confederation TEXT NOT NULL,
+    sofascore_id INTEGER NOT NULL DEFAULT 0,
+    strength_factor REAL NOT NULL DEFAULT 1.00
+);
+
+-- 1. Tabla de Equipos Registrados (Multi-Liga)
 CREATE TABLE IF NOT EXISTS teams (
     team_id INTEGER PRIMARY KEY,
     name TEXT NOT NULL,
     short_name TEXT NOT NULL,
-    updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+    competition_id INTEGER NOT NULL DEFAULT 72,
+    competition_name TEXT NOT NULL DEFAULT 'Liga Profesional Argentina',
+    country TEXT NOT NULL DEFAULT 'Argentina',
+    strength_factor REAL NOT NULL DEFAULT 1.00,
+    updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (competition_id) REFERENCES competitions(competition_id) ON DELETE SET DEFAULT
 );
 
--- 2. Tabla de Jugadores Registrados por Equipo
+-- 2. Tabla de Jugadores Registrados por Equipo (incluyendo soporte Cold-Start y Transferencias)
 CREATE TABLE IF NOT EXISTS players (
     player_id INTEGER NOT NULL,
     team_id INTEGER NOT NULL,
@@ -30,6 +46,14 @@ CREATE TABLE IF NOT EXISTS players (
     total_minutes INTEGER DEFAULT 0,
     average_rating REAL DEFAULT 6.5,
     currently_in_club INTEGER NOT NULL DEFAULT 1 CHECK(currently_in_club IN (0, 1)),
+    -- Metadatos para resolución de Jugador Nuevo en el Club (Cold-Start Híbrido):
+    is_new_signing INTEGER NOT NULL DEFAULT 0 CHECK(is_new_signing IN (0, 1)),
+    origin_type TEXT NOT NULL DEFAULT 'ESTABLISHED' CHECK(origin_type IN ('ESTABLISHED', 'TRANSFERRED', 'YOUTH_OR_EXTERNAL')),
+    previous_team_id INTEGER NOT NULL DEFAULT 0,
+    previous_team_name TEXT NOT NULL DEFAULT '',
+    previous_matches_played INTEGER NOT NULL DEFAULT 0,
+    previous_average_rating REAL NOT NULL DEFAULT 0.0,
+    previous_league_strength REAL NOT NULL DEFAULT 1.0,
     PRIMARY KEY (team_id, player_id),
     FOREIGN KEY (team_id) REFERENCES teams(team_id) ON DELETE CASCADE
 );
@@ -44,6 +68,8 @@ CREATE TABLE IF NOT EXISTS matches (
     opponent_id INTEGER NOT NULL,
     opponent_name TEXT NOT NULL,
     condicion TEXT NOT NULL,         -- 'Local' | 'Visitante'
+    competition_id INTEGER NOT NULL DEFAULT 72,
+    competition_name TEXT NOT NULL DEFAULT 'Liga Profesional Argentina',
     -- Las 20 métricas de interés del modelo lineal:
     goles_a_favor REAL NOT NULL DEFAULT 0,
     goles_en_contra REAL NOT NULL DEFAULT 0,
@@ -69,10 +95,6 @@ CREATE TABLE IF NOT EXISTS matches (
 );
 
 -- 4. Tabla de Alineaciones por Partido (Vector de Entrada x in {0, 1}^n)
--- Registra los jugadores iniciales (TITULAR -> played=1),
--- sustitutos que ingresaron (SUPLENTE_INGRESO -> played=1)
--- y convocados que no formaron parte del encuentro (SUPLENTE_SIN_INGRESAR -> played=0).
--- Los jugadores del plantel no presentes en un partido tienen implícitamente played=0.
 CREATE TABLE IF NOT EXISTS match_lineups (
     debug_id INTEGER NOT NULL,
     team_id INTEGER NOT NULL,
@@ -86,7 +108,10 @@ CREATE TABLE IF NOT EXISTS match_lineups (
 );
 
 -- Índices para optimizar consultas concurrentes del Backend C++
+CREATE INDEX IF NOT EXISTS idx_teams_competition ON teams(competition_id);
 CREATE INDEX IF NOT EXISTS idx_players_team ON players(team_id);
+CREATE INDEX IF NOT EXISTS idx_players_pid ON players(player_id);
 CREATE INDEX IF NOT EXISTS idx_matches_team ON matches(team_id);
+CREATE INDEX IF NOT EXISTS idx_matches_comp ON matches(competition_id);
 CREATE INDEX IF NOT EXISTS idx_lineups_match ON match_lineups(debug_id);
 CREATE INDEX IF NOT EXISTS idx_lineups_team_player ON match_lineups(team_id, player_id);

@@ -14,7 +14,8 @@ namespace lpf::domain {
 
 /**
  * @class TeamTransformationModel
- * @brief Modela la Transformación Lineal T_E: R^n -> R^20 asociada a un equipo E.
+ * @brief Modela la Transformación Lineal T_E: R^n -> R^20 asociada a un equipo E
+ *        con resolución híbrida para Jugadores Nuevos en el Club (Cold-Start & Cross-Club Transfer).
  *
  * Sea n la cantidad de jugadores registrados del equipo y m la cantidad de partidos (m=20).
  * - Matriz de alineaciones históricas: X in {0, 1}^(n x m), donde X(j, k) = 1 si el jugador j
@@ -22,10 +23,19 @@ namespace lpf::domain {
  * - Matriz de métricas observadas: Y in R^(20 x m).
  * - Matriz de la transformación lineal: A_E in R^(20 x n), obtenida mediante Pseudoinversa de
  *   Moore-Penrose regularizada (Tikhonov-Ridge) alrededor de la base canónica del plantel:
- *     A_E = A_0 + (Y - A_0 * X_norm) * (X_norm)^+
+ *     A_emp = A_0 + (Y - A_0 * X_norm) * (X_norm)^+
  *
- * Para cualquier vector de alineación inicial x in {0, 1}^n (con ||x||_1 = 11 titulares):
- *     y_hat = T_E(x) = A_E * x  in R^20
+ * Resolución del Problema del Jugador Nuevo en el Club (matchesPlayed < 3 o 0 PJ):
+ * Sea alpha_j = PJ_j / (PJ_j + 3.0) in [0, 1] el factor de credibilidad empírica en el club actual.
+ * - Caso 1 (TRANSFERRED): Si el jugador proviene de otro club registrado en la BD Multi-Liga,
+ *   se proyecta su diferencial de rendimiento relativo del club de origen ajustado por el
+ *   Coeficiente de Fuerza de Liga rho = (lambda_orig / lambda_dest)^0.65 sobre el subespacio
+ *   posicional a_bar_P del nuevo club.
+ * - Caso 2 (YOUTH_OR_EXTERNAL): Si es un debutante o incorporación externa sin club previo en BD,
+ *   se inicializa su vector columna a partir del Prior Posicional del club a_bar_P (GK/DEF/MID/FWD)
+ *   ponderado por su valoración previa y regularización bayesiana (James-Stein shrinkage).
+ * - Combinación convexa progresiva conforme suma partidos en el nuevo club:
+ *     A_E(., j) = (1 - alpha_j) * a_j^prior + alpha_j * A_emp(., j)
  */
 class TeamTransformationModel {
 private:
@@ -34,8 +44,11 @@ private:
     math::Matrix binaryMatrixX_;       // X in {0, 1}^(n x m)
     math::Matrix normalizedMatrixX_;   // X_norm in R^(n x m), columnas suman 11.0
     math::Matrix metricsMatrixY_;      // Y in R^(20 x m)
-    math::Matrix transformationMatrix_;// A_E in R^(20 x n)
+    math::Matrix empiricalMatrixA_;    // A_emp = A_0 + Delta_A in R^(20 x n)
+    math::Matrix transformationMatrix_;// A_E final con resolución Cold-Start in R^(20 x n)
     MatchMetrics historicalAverage_;   // Promedio histórico en R^20
+    std::unordered_map<std::string, std::vector<double>> positionalPriors_; // GK, DEF, MID, FWD -> R^20
+    double meanSquadRating_ = 6.75;
     double frobeniusResidual_ = 0.0;
     double rSquared_ = 0.0;
 
@@ -48,12 +61,189 @@ public:
     }
 
     const Team& team() const noexcept { return team_; }
+    Team& mutableTeam() noexcept { return team_; }
     const math::Matrix& transformationMatrix() const noexcept { return transformationMatrix_; }
     const math::Matrix& binaryMatrixX() const noexcept { return binaryMatrixX_; }
     const math::Matrix& metricsMatrixY() const noexcept { return metricsMatrixY_; }
     const MatchMetrics& historicalAverage() const noexcept { return historicalAverage_; }
+    double meanSquadRating() const noexcept { return meanSquadRating_; }
     double frobeniusResidual() const noexcept { return frobeniusResidual_; }
     double rSquared() const noexcept { return rSquared_; }
+
+    bool hasPlayer(int playerId) const {
+        return playerIdToIndex_.find(playerId) != playerIdToIndex_.end();
+    }
+
+    std::vector<double> getPlayerColumn(int playerId) const {
+        auto it = playerIdToIndex_.find(playerId);
+        if (it == playerIdToIndex_.end()) {
+            return std::vector<double>(NUM_METRICS, 0.0);
+        }
+        return transformationMatrix_.getColumn(it->second);
+    }
+
+    /**
+     * @brief Devuelve el vector Prior Posicional a_bar_P in R^20 para la línea táctica
+     *        indicada (GK, DEF, MID, FWD) en este club.
+     */
+    std::vector<double> getPositionalPrior(const std::string& positionCode) const {
+        auto it = positionalPriors_.find(positionCode);
+        if (it != positionalPriors_.end()) {
+            return it->second;
+        }
+        std::vector<double> fallback(NUM_METRICS, 0.0);
+        for (std::size_t i = 0; i < NUM_METRICS; ++i) {
+            fallback[i] = historicalAverage_[i] / 11.0;
+        }
+        return fallback;
+    }
+
+    /**
+     * @brief Sintetiza la columna a_new in R^20 para un jugador nuevo (transferido desde otro
+     *        club con vector sourceCol, o debutante/externo cuando sourceCol está vacío).
+     */
+    std::vector<double> synthesizeNewPlayerColumn(
+        const std::string& positionCode,
+        double playerPriorRating,
+        double sourceLeagueStrength,
+        const std::vector<double>& sourceCol = {},
+        const std::vector<double>& sourcePosBaseline = {}
+    ) const {
+        std::vector<double> posPrior = getPositionalPrior(positionCode);
+        const auto& cat = getMetricsCatalog();
+
+        double targetStrength = std::max(0.50, team_.strengthFactor);
+        double srcStrength = std::max(0.50, sourceLeagueStrength);
+        // Coeficiente de escala inter-liga: rho = (lambda_orig / lambda_dest)^0.65
+        double rhoLeague = std::pow(srcStrength / targetStrength, 0.65);
+        rhoLeague = std::clamp(rhoLeague, 0.72, 1.38);
+
+        double effRating = (playerPriorRating > 1.0) ? playerPriorRating : meanSquadRating_;
+        double ratingDiff = effRating - meanSquadRating_;
+
+        std::vector<double> outCol(NUM_METRICS, 0.0);
+
+        if (!sourceCol.empty() && sourceCol.size() == NUM_METRICS) {
+            // RAMA 1 (Transferencia Matricial Inter-Club / Inter-Liga):
+            // Proyecta el vector diferencial del club de origen sobre la base posicional del club destino
+            constexpr double kappaAdapt = 0.80; // Coeficiente de adaptación táctica al nuevo club
+            for (std::size_t i = 0; i < NUM_METRICS; ++i) {
+                double srcBase = (sourcePosBaseline.size() == NUM_METRICS)
+                                 ? sourcePosBaseline[i]
+                                 : sourceCol[i];
+                double deltaSrc = sourceCol[i] - srcBase;
+
+                if (i == PROMEDIO_VALORACION) {
+                    double adjustedRat = effRating * (0.90 + 0.10 * rhoLeague);
+                    adjustedRat = std::clamp(adjustedRat, 5.5, 9.2);
+                    outCol[i] = (0.55 * posPrior[i]) + (0.45 * (adjustedRat / 11.0));
+                } else if (cat[i].higherIsBetter) {
+                    double leagueMod = 1.0 + 0.35 * (rhoLeague - 1.0) + 0.08 * ratingDiff;
+                    leagueMod = std::clamp(leagueMod, 0.80, 1.28);
+                    double scaledDelta = deltaSrc * ((rhoLeague >= 1.0) ? rhoLeague : (0.85 * rhoLeague));
+                    double maxShift = std::max(0.20, std::abs(posPrior[i]) * 0.45);
+                    scaledDelta = std::clamp(kappaAdapt * scaledDelta, -maxShift, maxShift);
+                    outCol[i] = std::max(0.0, posPrior[i] * leagueMod + scaledDelta);
+                } else {
+                    // Métrica inversa (goles en contra, faltas, tarjetas, tiros rivales): menor es mejor
+                    double invMod = 1.0 - 0.30 * (rhoLeague - 1.0) - 0.06 * ratingDiff;
+                    invMod = std::clamp(invMod, 0.75, 1.25);
+                    double scaledDelta = deltaSrc / std::max(0.75, rhoLeague);
+                    double maxShift = std::max(0.15, std::abs(posPrior[i]) * 0.40);
+                    scaledDelta = std::clamp(kappaAdapt * scaledDelta, -maxShift, maxShift);
+                    outCol[i] = std::max(0.0, posPrior[i] * invMod + scaledDelta);
+                }
+            }
+        } else {
+            // RAMA 2 (Debutante / Incorporación Externa sin matriz previa en BD):
+            // Prior Posicional del club ponderado por rating previo y contracción de incertidumbre
+            double conservativeShrink = 0.98 + 0.09 * ratingDiff + 0.20 * (rhoLeague - 1.0);
+            conservativeShrink = std::clamp(conservativeShrink, 0.85, 1.20);
+
+            for (std::size_t i = 0; i < NUM_METRICS; ++i) {
+                if (i == PROMEDIO_VALORACION) {
+                    outCol[i] = (0.65 * posPrior[i]) + (0.35 * (effRating / 11.0));
+                } else if (cat[i].higherIsBetter) {
+                    outCol[i] = std::max(0.0, posPrior[i] * conservativeShrink);
+                } else {
+                    outCol[i] = std::max(0.0, posPrior[i] * (2.0 - conservativeShrink));
+                }
+            }
+        }
+
+        return outCol;
+    }
+
+    /**
+     * @brief Inyecta el vector real del club anterior para un jugador transferido y
+     *        recalcula su columna en A_E combinando (1 - alpha_j)*a_prior + alpha_j*A_emp.
+     */
+    void applyCrossClubTransferVector(
+        int playerId,
+        const std::vector<double>& sourceCol,
+        const std::vector<double>& sourcePosBaseline,
+        double sourceLeagueStrength
+    ) {
+        auto it = playerIdToIndex_.find(playerId);
+        if (it == playerIdToIndex_.end()) return;
+
+        std::size_t j = it->second;
+        Player& p = team_.squad[j];
+        double priorRat = (p.previousAverageRating > 1.0) ? p.previousAverageRating : p.averageRating;
+        std::vector<double> transferPrior = synthesizeNewPlayerColumn(
+            p.positionCode, priorRat, sourceLeagueStrength, sourceCol, sourcePosBaseline
+        );
+
+        double pj = static_cast<double>(p.matchesPlayed);
+        double alpha = pj / (pj + 3.0); // Peso de adaptación empírica en el nuevo club
+        p.adaptationAlpha = alpha;
+
+        for (std::size_t i = 0; i < NUM_METRICS; ++i) {
+            double empVal = empiricalMatrixA_(i, j);
+            transformationMatrix_(i, j) = (1.0 - alpha) * transferPrior[i] + alpha * empVal;
+        }
+    }
+
+    /**
+     * @brief Evalúa el puntaje táctico efectivo s_j de un jugador del plantel (o simulado).
+     */
+    double evaluatePlayerColumnScore(
+        const Player& p,
+        const std::vector<double>& col,
+        const ITacticalStrategy& strategy
+    ) const {
+        double rawLinearScore = strategy.evaluateVector(col);
+
+        double targetStrength = std::max(0.50, team_.strengthFactor);
+        double srcStrength = std::max(0.50, p.previousLeagueStrength);
+        double leagueRatio = std::pow(srcStrength / targetStrength, 0.50);
+        leagueRatio = std::clamp(leagueRatio, 0.75, 1.35);
+
+        // Experiencia efectiva: combina los PJ en el club actual con los PJ en su club de origen
+        double effectiveMatches = static_cast<double>(p.matchesPlayed) +
+                                  0.75 * static_cast<double>(p.previousMatchesPlayed) * leagueRatio;
+        double effectiveMinutes = static_cast<double>(p.totalMinutes) +
+                                  0.75 * static_cast<double>(p.previousMatchesPlayed * 75) * leagueRatio;
+
+        double matchesFactor = std::min(1.0, effectiveMatches / 20.0);
+        double minutesFactor = std::min(1.0, effectiveMinutes / 1100.0);
+
+        double refRating = (p.matchesPlayed > 0) ? p.averageRating
+                         : (p.previousAverageRating > 1.0) ? p.previousAverageRating
+                         : p.averageRating;
+        double ratingBonus = (refRating - 6.65) * 4.5;
+
+        if (effectiveMatches < 3.0) {
+            // Jugador nuevo sin historial previo cargado (Debutante / Incorporación Externa):
+            // Regularización Bayesiana suave (sin penalización abrupta) para permitir evaluar
+            // su aporte real en el 11 y competir limpiamente según su prior posicional y rating.
+            double coldStartWeight = 0.56 + 0.08 * effectiveMatches;
+            return rawLinearScore * coldStartWeight + 0.65 * ratingBonus;
+        }
+
+        double continuityWeight = 0.35 + 0.35 * matchesFactor + 0.30 * minutesFactor;
+        return rawLinearScore * continuityWeight + ratingBonus;
+    }
 
     /**
      * @brief Caso de Uso (a): Dado un conjunto de jugadores seleccionados (equipo inicial),
@@ -84,8 +274,6 @@ public:
             }
         }
 
-        // Si el usuario ingresó K jugadores (ej. K=11 titulares, o K>11 incluyendo suplentes),
-        // normalizamos la energía de entrada a 11 unidades activas (para K=11 el factor es 1.0 exacto).
         double activeSum = std::accumulate(inputVec.begin(), inputVec.end(), 0.0);
         double scaleFactor = (activeSum > 0.0) ? (11.0 / activeSum) : 1.0;
         std::vector<double> scaledInput(n, 0.0);
@@ -101,6 +289,9 @@ public:
         BehaviorPredictionResult result;
         result.teamId = team_.teamId;
         result.teamName = team_.name;
+        result.competitionId = team_.competitionId;
+        result.competitionName = team_.competitionName;
+        result.leagueStrengthFactor = team_.strengthFactor;
         result.selectedPlayerIds = validSelectedIds;
         result.binaryAlignmentVector = binaryVec;
         result.rawLinearOutput = rawMetrics;
@@ -156,12 +347,10 @@ public:
             allContributions[j].tacticalScore = computeEffectivePlayerScore(j, strategy);
         }
 
-        // Separar candidatos ELEGIBLES (que pertenecen actualmente al club) por línea posicional
-        // y ordenar de mayor a menor aporte lineal s_j.
         std::vector<std::size_t> gks, defs, mids, fwds;
         for (std::size_t j = 0; j < n; ++j) {
             if (!team_.squad[j].currentlyInClub) {
-                continue; // Jugador transferido / dado de baja: no elegible (x_j = 0 fijo)
+                continue;
             }
             const std::string& pos = team_.squad[j].positionCode;
             if (pos == "GK") gks.push_back(j);
@@ -211,6 +400,9 @@ public:
                 OptimalLineupResult res;
                 res.teamId = team_.teamId;
                 res.teamName = team_.name;
+                res.competitionId = team_.competitionId;
+                res.competitionName = team_.competitionName;
+                res.leagueStrengthFactor = team_.strengthFactor;
                 res.strategyName = strategy.name();
                 res.formationName = form.name;
                 res.optimalBinaryVector = pred.binaryAlignmentVector;
@@ -229,7 +421,6 @@ public:
                     res.optimalStarters.push_back(pc);
                 }
 
-                // Seleccionar los mejores 7 suplentes (1 arquero suplente + 6 de campo)
                 std::vector<std::size_t> remainingField;
                 if (gks.size() > 1) {
                     PlayerContribution gkSub = allContributions[gks[1]];
@@ -278,20 +469,7 @@ public:
 private:
     double computeEffectivePlayerScore(std::size_t playerIdx, const ITacticalStrategy& strategy) const {
         std::vector<double> col = transformationMatrix_.getColumn(playerIdx);
-        double rawLinearScore = strategy.evaluateVector(col);
-
-        const Player& p = team_.squad[playerIdx];
-        // Factor de regularización empírica según continuidad (partidos jugados y minutos)
-        // para garantizar que el 11 óptimo priorice jugadores titulares con rodaje comprobado.
-        double matchesFactor = static_cast<double>(p.matchesPlayed) / 20.0;
-        double minutesFactor = std::min(1.0, static_cast<double>(p.totalMinutes) / 1100.0);
-        double ratingBonus = (p.averageRating - 6.65) * 4.5;
-        double continuityWeight = 0.35 + 0.35 * matchesFactor + 0.30 * minutesFactor;
-
-        if (p.matchesPlayed < 3) {
-            return rawLinearScore * 0.25 - 6.0;
-        }
-        return rawLinearScore * continuityWeight + ratingBonus;
+        return evaluatePlayerColumnScore(team_.squad[playerIdx], col, strategy);
     }
 
     void buildModel(double ridgeLambda) {
@@ -304,6 +482,7 @@ private:
         }
 
         if (n == 0 || m == 0) {
+            empiricalMatrixA_ = math::Matrix(NUM_METRICS, n, 0.0);
             transformationMatrix_ = math::Matrix(NUM_METRICS, n, 0.0);
             return;
         }
@@ -353,14 +532,14 @@ private:
                 ratedCount++;
             }
         }
-        double meanSquadRating = (ratedCount > 0) ? (sumRatings / ratedCount) : 6.75;
+        meanSquadRating_ = (ratedCount > 0) ? (sumRatings / ratedCount) : 6.75;
 
         // 1. Construir matriz base canónica A_0 in R^(20 x n)
         math::Matrix A0(NUM_METRICS, n, 0.0);
         for (std::size_t j = 0; j < n; ++j) {
             const Player& p = team_.squad[j];
             double reliability = static_cast<double>(p.matchesPlayed) / (p.matchesPlayed + 4.0);
-            double ratingDiff = (p.matchesPlayed > 0) ? (p.averageRating - meanSquadRating) : -0.15;
+            double ratingDiff = (p.matchesPlayed > 0) ? (p.averageRating - meanSquadRating_) : 0.0;
             double modFactor = 1.0 + 0.12 * reliability * ratingDiff;
 
             for (std::size_t i = 0; i < NUM_METRICS; ++i) {
@@ -396,10 +575,59 @@ private:
             }
         }
 
-        // 4. Matriz final de la Transformación Lineal del Equipo: A_E = A_0 + Delta_A
-        transformationMatrix_ = A0 + deltaA;
+        // 4. Matriz empírica inicial: A_emp = A_0 + Delta_A
+        empiricalMatrixA_ = A0 + deltaA;
+        transformationMatrix_ = empiricalMatrixA_;
 
-        // 5. Métricas de bondad de ajuste matricial (Norma de Frobenius y R^2)
+        // 5. Calcular los vectores Prior Posicionales a_bar_P in R^20 por línea táctica (GK, DEF, MID, FWD)
+        //    promediando ponderadamente por continuidad a los jugadores establecidos (PJ >= 3).
+        const std::array<std::string, 4> posCodes = {"GK", "DEF", "MID", "FWD"};
+        for (const auto& code : posCodes) {
+            std::vector<double> sumCol(NUM_METRICS, 0.0);
+            double totalWeight = 0.0;
+            for (std::size_t j = 0; j < n; ++j) {
+                const Player& p = team_.squad[j];
+                if (p.positionCode == code && p.matchesPlayed >= 3) {
+                    double w = static_cast<double>(p.matchesPlayed);
+                    for (std::size_t i = 0; i < NUM_METRICS; ++i) {
+                        sumCol[i] += w * empiricalMatrixA_(i, j);
+                    }
+                    totalWeight += w;
+                }
+            }
+            if (totalWeight > 0.0) {
+                for (std::size_t i = 0; i < NUM_METRICS; ++i) {
+                    sumCol[i] /= totalWeight;
+                }
+            } else {
+                for (std::size_t i = 0; i < NUM_METRICS; ++i) {
+                    sumCol[i] = historicalAverage_[i] / 11.0;
+                }
+            }
+            positionalPriors_[code] = std::move(sumCol);
+        }
+
+        // 6. Aplicar Resolución Cold-Start Híbrida para jugadores nuevos en el club (PJ < 3):
+        //    A_E(., j) = (1 - alpha_j) * a_j^prior + alpha_j * A_emp(., j)
+        for (std::size_t j = 0; j < n; ++j) {
+            Player& p = team_.squad[j];
+            double pj = static_cast<double>(p.matchesPlayed);
+            double alpha = pj / (pj + 3.0);
+            p.adaptationAlpha = alpha;
+
+            if (p.matchesPlayed < 3) {
+                double priorRat = (p.previousAverageRating > 1.0) ? p.previousAverageRating : p.averageRating;
+                double srcLeague = (p.previousLeagueStrength > 0.1) ? p.previousLeagueStrength : team_.strengthFactor;
+                std::vector<double> priorCol = synthesizeNewPlayerColumn(
+                    p.positionCode, priorRat, srcLeague
+                );
+                for (std::size_t i = 0; i < NUM_METRICS; ++i) {
+                    transformationMatrix_(i, j) = (1.0 - alpha) * priorCol[i] + alpha * empiricalMatrixA_(i, j);
+                }
+            }
+        }
+
+        // 7. Métricas de bondad de ajuste matricial sobre los partidos jugados (Norma de Frobenius y R^2)
         math::Matrix Y_hat = transformationMatrix_ * normalizedMatrixX_;
         math::Matrix residualMat = metricsMatrixY_ - Y_hat;
         frobeniusResidual_ = residualMat.frobeniusNorm();

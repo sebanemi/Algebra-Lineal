@@ -66,6 +66,13 @@ Siguiendo la metodología de Pressman, el diseño se estructura en cuatro nivele
 - **RF-07 (Inspección Matricial y Auditoría Matemática):** El sistema debe permitir visualizar la matriz $A_E \in \mathbb{R}^{20 \times n}$ de cada equipo, su coeficiente de determinación $R^2$ y su norma residual de Frobenius $\|Y - A_E X\|_F$.
 - **RF-08 (Ingesta y Persistencia Relacional):** El sistema debe integrar los datos obtenidos en Python (`sofascore_modulo.py`) dentro de una base de datos relacional SQLite3 (`data/lpf_analytics.db`).
 - **RF-09 (Restricción de Elegibilidad por Pertenencia Actual al Plantel):** El sistema debe distinguir entre jugadores que participaron históricamente en los últimos 20 partidos pero ya no pertenecen al equipo (`pertenece_actualmente = 0` / `currently_in_club = 0`, por transferencia o baja) y los jugadores del plantel actual (`currently_in_club = 1`). Los ex-jugadores integran la matriz histórica $A_E \in \mathbb{R}^{20 \times n}$ para no distorsionar las ecuaciones de los partidos pasados, pero **no son elegibles** ($x_j = 0$ fijo) para conformar alineaciones actuales ni el 11 óptimo en los casos **(a)**, **(b)** y **(c)**.
+- **RF-10 (Soporte Multi-Liga y Catálogo de Competiciones con Coeficiente de Fuerza $\lambda_L$):** El sistema debe gestionar múltiples ligas y competiciones nacionales e internacionales (LPF Argentina, Premier League, LaLiga, Serie A, Bundesliga, Ligue 1, Brasileirão, CONMEBOL Libertadores, UEFA Champions League, Primeira Liga, Liga MX, MLS, más competiciones configurables por ID). Cada competición posee un **Coeficiente de Fuerza de Liga** ($\lambda_L \in [0.70, 1.35]$, con $\lambda_{\text{LPF}} = 1.00$ como referencia base) que permite acoplar predicciones entre equipos de distintas ligas.
+- **RF-11 (Resolución Híbrida del Jugador Nuevo en un Club — *Cold-Start Problem* en $A_E$):** Cuando un jugador pertenece actualmente al plantel (`currently_in_club = 1`) pero es nuevo en el club ($\text{PJ}_j = 0$ o $\text{PJ}_j < 3$, por lo que su fila en la matriz de diseño $X \in \{0, 1\}^{n \times m}$ es nula o estadísticamente insuficiente), el motor C++ debe construir su vector columna en $A_E \in \mathbb{R}^{20 \times n}$ mediante un **Modelo Híbrido en Dos Pasadas**:
+  1. **Rama de Transferencia Matricial (`origin_type = 'TRANSFERRED'`):** Si el jugador registra historial previo en otro club $E_{\text{orig}}$ dentro de la base de datos Multi-Liga, se extrae su vector diferencial respecto al subespacio posicional de origen ($\delta_j^{\text{orig}} = a_j^{(E_{\text{orig}})} - \bar{a}_P^{(E_{\text{orig}})}$), se escala por el cociente de fuerza inter-liga $\rho_{\text{league}} = (\lambda_{\text{orig}} / \lambda_{\text{dest}})^{0.65}$ y se proyecta sobre el prior posicional $\bar{a}_P^{(E_{\text{dest}})}$ del nuevo club.
+  2. **Rama de Prior Posicional (`origin_type = 'YOUTH_OR_EXTERNAL'`):** Si es un debutante absoluto o proviene de un club externo no cargado, se inicializa su vector columna con el **Prior Posicional del Club** $\bar{a}_P^{(E_{\text{dest}})} \in \mathbb{R}^{20}$ (media ponderada de las columnas de los jugadores consolidados de su misma línea táctica `GK`/`DEF`/`MID`/`FWD`) modulado por su valoración previa y contracción de James-Stein.
+  3. **Convergencia Bayesiana Progresiva:** A medida que el jugador suma partidos en el nuevo club ($\text{PJ}_j \ge 1$), su columna converge suavemente hacia su rendimiento empírico local mediante el peso de credibilidad $\alpha(\text{PJ}_j) = \frac{\text{PJ}_j}{\text{PJ}_j + 3}$:
+     $$A_E(\cdot, j) = (1 - \alpha(\text{PJ}_j)) \cdot a_j^{\text{prior}} + \alpha(\text{PJ}_j) \cdot A_{\text{emp}}(\cdot, j)$$
+- **RF-12 (Simulador de Fichajes y Mercado de Pases Multi-Liga):** El sistema debe permitir simular en tiempo real qué ocurriría si un club destino incorpora a un jugador de otro club/liga (o a un debutante/refuerzo externo), inyectando su vector columna $a_{\text{new}} \in \mathbb{R}^{20}$ en la transformación lineal del club destino y comparando las 20 métricas del 11 inicial antes y después del fichaje.
 
 ### 2.2 Requerimientos No Funcionales (RNF)
 
@@ -90,11 +97,28 @@ Sea un equipo $E$ con $n$ jugadores registrados en su plantel y $m = 20$ partido
    Cada columna $k$ de $Y \in \mathbb{R}^{20 \times m}$ contiene las 20 métricas observadas del equipo en el partido $k$.
 
 3. **Obtención de la Matriz de la Transformación Lineal $A_E \in \mathbb{R}^{20 \times n}$:**
-   Descomponemos $A_E = A_0 + \Delta A_E$, donde $A_0 \in \mathbb{R}^{20 \times n}$ es la transformación base canónica del plantel ($\frac{1}{11}\bar{y}_E$ ponderada por la continuidad y valoración individual de cada jugador para romper la colinealidad entre titulares que jugaron exactamente los mismos encuentros) y $\Delta A_E$ resuelve el sistema lineal de residuos $\Delta A_E \cdot \tilde{X} \approx Y - A_0 \tilde{X}$ mediante la **Pseudoinversa de Moore-Penrose con regularización de Tikhonov ($\lambda = 0.08$)**:
+   Descomponemos $A_{\text{emp}} = A_0 + \Delta A_E$, donde $A_0 \in \mathbb{R}^{20 \times n}$ es la transformación base canónica del plantel ($\frac{1}{11}\bar{y}_E$ ponderada por la continuidad y valoración individual de cada jugador para romper la colinealidad entre titulares que jugaron exactamente los mismos encuentros) y $\Delta A_E$ resuelve el sistema lineal de residuos $\Delta A_E \cdot \tilde{X} \approx Y - A_0 \tilde{X}$ mediante la **Pseudoinversa de Moore-Penrose con regularización de Tikhonov ($\lambda = 1.35$)**:
    $$\Delta A_E = (Y - A_0 \tilde{X}) \cdot \tilde{X}^+, \qquad \tilde{X}^+ = \tilde{X}^T (\tilde{X} \tilde{X}^T + \lambda I_n)^{-1}$$
    Por lo tanto, la transformación lineal del equipo queda unívocamente determinada por la matriz $A_E \in \mathbb{R}^{20 \times n}$:
    $$T_E(x) = A_E \cdot x$$
    Donde cada columna $j$ de $A_E$ es $T_E(e_j) \in \mathbb{R}^{20}$: la imagen del vector canónico $e_j$, que representa el aporte lineal directo del jugador $j$ a las 20 métricas del equipo.
+
+4. **Resolución Formal del Problema del Jugador Nuevo en un Club (*Cold-Start Híbrido* y Transferencia Matricial):**
+   Cuando un jugador $j$ es nuevo en el club $E$ ($\text{PJ}_j = 0$, o en etapa inicial $\text{PJ}_j < 3$), su fila $j$ en la matriz histórica $X \in \{0, 1\}^{n \times m}$ es el vector nulo $\mathbf{0}^T$ (o carece de soporte muestral), provocando que $\Delta A_E(\cdot, j) = \mathbf{0}$. Para evitar que su aporte quede indeterminado o subestimado, definimos:
+   - **Subespacio de Prior Posicional del Club ($\bar{a}_P^{(E)} \in \mathbb{R}^{20}$):** Para cada línea táctica $P \in \{\text{GK}, \text{DEF}, \text{MID}, \text{FWD}\}$, calculamos el baricentro ponderado por partidos jugados de las columnas de los jugadores consolidados ($\text{PJ}_k \ge 3$) de esa misma posición en el club $E$:
+     $$\bar{a}_P^{(E)} = \frac{\sum_{k \in \mathcal{S}_P} \text{PJ}_k \cdot A_{\text{emp}}(\cdot, k)}{\sum_{k \in \mathcal{S}_P} \text{PJ}_k}$$
+   - **Caso 1 — Jugador Transferido desde otro Club de la BD Multi-Liga (`TRANSFERRED`):**
+     Si el jugador proviene de un club origen $E_{\text{orig}}$ (con coeficiente de fuerza de liga $\lambda_{\text{orig}}$) hacia el club destino $E$ (con fuerza $\lambda_E$), extraemos su vector diferencial en el club de origen $\delta_j^{\text{orig}} = A_{E_{\text{orig}}}(\cdot, j) - \bar{a}_P^{(E_{\text{orig}})}$ y aplicamos el factor de escala inter-liga $\rho = (\lambda_{\text{orig}} / \lambda_E)^{0.65}$ junto con el coeficiente de adaptación táctica $\kappa = 0.80$:
+     $$a_{i, j}^{\text{prior}} = \bar{a}_{P, i}^{(E)} \cdot \phi_i(\rho, r_j^{\text{prev}}) + \kappa \cdot \psi_i(\rho) \cdot \delta_{i, j}^{\text{orig}}$$
+   - **Caso 2 — Jugador Nuevo Debutante / Incorporación Externa (`YOUTH_OR_EXTERNAL`):**
+     Si el jugador no posee matriz previa en la base de datos, su vector prior $a_j^{\text{prior}}$ se construye directamente sobre el prior posicional $\bar{a}_P^{(E)}$ modulado por su valoración previa estimada y contracción bayesiana de incertidumbre.
+   - **Interpolación de Credibilidad Empírica ($\alpha_j$):**
+     Definimos el coeficiente de adaptación empírica $\alpha_j = \frac{\text{PJ}_j}{\text{PJ}_j + 3.0} \in [0, 1)$. La columna final del jugador en $A_E$ se obtiene mediante la combinación convexa:
+     $$A_E(\cdot, j) = (1 - \alpha_j) \cdot a_j^{\text{prior}} + \alpha_j \cdot A_{\text{emp}}(\cdot, j)$$
+     Para $\text{PJ}_j = 0$ (recién llegado sin debutar), $\alpha_j = 0 \implies A_E(\cdot, j) = a_j^{\text{prior}}$. Conforme el jugador suma minutos y partidos en el nuevo club ($\text{PJ}_j = 1, 2, \dots, 20$), $\alpha_j \to 1$ y su columna converge suavemente hacia su rendimiento empírico medido en el club.
+
+5. **Acoplamiento Bilateral Inter-Liga ($\lambda_A$ vs $\lambda_B$):**
+   En enfrentamientos entre un Equipo $A$ (liga con fuerza $\lambda_A$) y un Equipo $B$ (liga con fuerza $\lambda_B$), las salidas de sus transformaciones lineales $\hat{y}_A = A_A x_A$ y $\hat{y}_B = A_B x_B$ se acoplan ponderando las tasas de generación ofensiva, tenencia e índice defensivo por los factores recíprocos $\gamma_{AB} = (\lambda_A / \lambda_B)^{0.55}$ y $\gamma_{BA} = (\lambda_B / \lambda_A)^{0.55}$ (que valen exactamente $1.0$ cuando ambos equipos pertenecen a la misma competición).
 
 ---
 
@@ -108,23 +132,26 @@ flowchart LR
     MultiUser(["👥 Múltiples Clientes Concurrentes"])
     API365(["🌐 API Pública 365Scores / SofaScore"])
 
-    subgraph Sistema_LPF["Sistema de Transformaciones Lineales LPF"]
+    subgraph Sistema_LPF["Sistema Multi-Liga de Transformaciones Lineales"]
         UC1["(Caso a) Simular Comportamiento\ndada una Alineación Inicial\ny_hat = A_E * x"]
         UC2["(Caso b) Obtener el Equipo Inicial\nde Mejor Rendimiento Posible\nx* = argmax (w^T * A_E) * x"]
-        UC3["(Caso c) Predecir Enfrentamiento\nentre Dos Equipos\nT_A(x_A) vs T_B(x_B)"]
+        UC3["(Caso c) Predecir Enfrentamiento\nIntra-Liga o Inter-Liga\nT_A(x_A) vs T_B(x_B) con lambda_L"]
         UC4["Inspeccionar Matriz de\nTransformación Lineal A_E (20 x n)"]
         UC5["Ejecutar Consultas Concurrentes\nen Pool de Hilos C++"]
-        UC6["Extraer y Sincronizar Datos\nhacia SQLite3 (Modo WAL)"]
+        UC6["Extraer y Sincronizar Ligas\nhacia SQLite3 (Modo WAL)"]
+        UC7["Simular Fichaje / Jugador Nuevo\n(Cold-Start Híbrido y Transferencia)"]
     end
 
     Analista --> UC1
     Analista --> UC2
     Analista --> UC3
     Analista --> UC4
+    Analista --> UC7
     MultiUser --> UC5
     UC5 --> UC1
     UC5 --> UC2
     UC5 --> UC3
+    UC5 --> UC7
     Analista --> UC6
     UC6 --> API365
 ```
@@ -377,15 +404,31 @@ sequenceDiagram
 
 ```mermaid
 erDiagram
+    COMPETITIONS ||--o{ TEAMS : "agrupa clubes (1:N)"
     TEAMS ||--o{ PLAYERS : "posee plantel (1:N)"
     TEAMS ||--o{ MATCHES : "disputa 20 partidos (1:N)"
     MATCHES ||--o{ MATCH_LINEUPS : "registra convocatoria (1:N)"
     PLAYERS ||--o{ MATCH_LINEUPS : "participa con 1 o 0 (1:N)"
 
+    COMPETITIONS {
+        int competition_id PK
+        string code UK
+        string name
+        string short_name
+        string country
+        string confederation
+        int sofascore_id
+        double strength_factor
+    }
+
     TEAMS {
         int team_id PK
         string name
         string short_name
+        int competition_id FK
+        string competition_name
+        string country
+        double strength_factor
         string updated_at
     }
 
@@ -402,6 +445,14 @@ erDiagram
         int matches_unused_sub
         int total_minutes
         double average_rating
+        int currently_in_club "1 elegible, 0 baja"
+        int is_new_signing "1 nuevo (<3 PJ), 0 consolidado"
+        string origin_type "ESTABLISHED | TRANSFERRED | YOUTH_OR_EXTERNAL"
+        int previous_team_id
+        string previous_team_name
+        int previous_matches_played
+        double previous_average_rating
+        double previous_league_strength
     }
 
     MATCHES {

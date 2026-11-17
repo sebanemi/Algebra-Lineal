@@ -67,7 +67,6 @@ public:
 #ifdef _WIN32
         std::vector<std::string> candidatePaths;
 
-        // 1. Resolver dinámicamente el directorio donde reside el ejecutable actual
         char exePath[MAX_PATH] = {0};
         DWORD len = GetModuleFileNameA(nullptr, exePath, MAX_PATH);
         if (len > 0 && len < MAX_PATH) {
@@ -81,7 +80,6 @@ public:
             }
         }
 
-        // 2. Rutas relativas al directorio de trabajo actual y PATH del sistema
         candidatePaths.push_back("sqlite3.dll");
         candidatePaths.push_back("bin\\sqlite3.dll");
         candidatePaths.push_back("..\\bin\\sqlite3.dll");
@@ -133,7 +131,7 @@ public:
 /**
  * @class SqliteRepository
  * @brief Implementación concreta de IDataRepository que consulta de forma segura para
- *        múltiples hilos la base de datos SQLite3 (data/lpf_analytics.db en modo WAL).
+ *        múltiples hilos la base de datos SQLite3 Multi-Liga (data/lpf_analytics.db en modo WAL).
  */
 class SqliteRepository final : public IDataRepository {
 private:
@@ -155,7 +153,6 @@ private:
         DWORD len = GetModuleFileNameA(nullptr, exePath, MAX_PATH);
         if (len > 0 && len < MAX_PATH) {
             fs::path exeDir = fs::path(std::string(exePath, len)).parent_path();
-            // Probar en el directorio del ejecutable, un nivel arriba (ej. bin/ -> raiz) y dos niveles arriba (ej. cmake-build-debug/)
             const fs::path bases[] = {exeDir, exeDir.parent_path(), exeDir.parent_path().parent_path()};
             for (const auto& base : bases) {
                 if (base.empty()) continue;
@@ -177,6 +174,39 @@ public:
         return "SQLite3 Native C++ Driver (WAL Mode) -> " + dbPath_;
     }
 
+    std::vector<domain::Competition> loadAllCompetitions() override {
+        std::lock_guard<std::mutex> lock(dbMutex_);
+
+        sqlite3* db = nullptr;
+        if (driver_.open(dbPath_.c_str(), &db) != SQLITE_OK_CODE || !db) {
+            throw std::runtime_error("Error al abrir la base de datos SQLite: " + dbPath_);
+        }
+
+        std::vector<domain::Competition> competitions;
+        sqlite3_stmt* stmt = nullptr;
+        const char* sql =
+            "SELECT competition_id, code, name, short_name, country, confederation, sofascore_id, strength_factor "
+            "FROM competitions ORDER BY strength_factor DESC, name ASC;";
+        if (driver_.prepare_v2(db, sql, -1, &stmt, nullptr) == SQLITE_OK_CODE) {
+            while (driver_.step(stmt) == SQLITE_ROW_CODE) {
+                domain::Competition c;
+                c.competitionId = driver_.column_int(stmt, 0);
+                c.code = safeText(driver_.column_text(stmt, 1));
+                c.name = safeText(driver_.column_text(stmt, 2));
+                c.shortName = safeText(driver_.column_text(stmt, 3));
+                c.country = safeText(driver_.column_text(stmt, 4));
+                c.confederation = safeText(driver_.column_text(stmt, 5));
+                c.sofascoreId = driver_.column_int(stmt, 6);
+                c.strengthFactor = driver_.column_double(stmt, 7);
+                competitions.push_back(std::move(c));
+            }
+            driver_.finalize(stmt);
+        }
+
+        driver_.close(db);
+        return competitions;
+    }
+
     std::vector<domain::Team> loadAllTeams() override {
         std::lock_guard<std::mutex> lock(dbMutex_);
 
@@ -186,22 +216,29 @@ public:
         }
 
         if (driver_.exec) {
-            driver_.exec(db, "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;", nullptr, nullptr, nullptr);
+            driver_.exec(db, "PRAGMA synchronous=NORMAL;", nullptr, nullptr, nullptr);
         }
 
         std::vector<domain::Team> teams;
         std::unordered_map<int, std::size_t> teamIdToIdx;
 
-        // 1. Cargar Equipos
+        // 1. Cargar Equipos (con metadatos de Liga / Competición y Fuerza de Liga)
         {
             sqlite3_stmt* stmt = nullptr;
-            const char* sql = "SELECT team_id, name, short_name FROM teams ORDER BY name ASC;";
+            const char* sql =
+                "SELECT team_id, name, short_name, competition_id, competition_name, country, strength_factor "
+                "FROM teams ORDER BY competition_id ASC, name ASC;";
             if (driver_.prepare_v2(db, sql, -1, &stmt, nullptr) == SQLITE_OK_CODE) {
                 while (driver_.step(stmt) == SQLITE_ROW_CODE) {
                     domain::Team t;
                     t.teamId = driver_.column_int(stmt, 0);
                     t.name = safeText(driver_.column_text(stmt, 1));
                     t.shortName = safeText(driver_.column_text(stmt, 2));
+                    t.competitionId = driver_.column_int(stmt, 3);
+                    t.competitionName = safeText(driver_.column_text(stmt, 4));
+                    t.country = safeText(driver_.column_text(stmt, 5));
+                    t.strengthFactor = driver_.column_double(stmt, 6);
+                    if (t.strengthFactor <= 0.0) t.strengthFactor = 1.00;
                     teamIdToIdx[t.teamId] = teams.size();
                     teams.push_back(std::move(t));
                 }
@@ -209,13 +246,15 @@ public:
             }
         }
 
-        // 2. Cargar Jugadores Registrados por Equipo (incluyendo estado de pertenencia actual)
+        // 2. Cargar Jugadores Registrados por Equipo (incluyendo soporte Cold-Start y Transferencias)
         {
             sqlite3_stmt* stmt = nullptr;
             const char* sql =
                 "SELECT player_id, team_id, name, short_name, position, position_code, "
                 "jersey_number, convocations_last_20, matches_played, matches_unused_sub, "
-                "total_minutes, average_rating, currently_in_club "
+                "total_minutes, average_rating, currently_in_club, "
+                "is_new_signing, origin_type, previous_team_id, previous_team_name, "
+                "previous_matches_played, previous_average_rating, previous_league_strength "
                 "FROM players ORDER BY team_id ASC, currently_in_club DESC, matches_played DESC, total_minutes DESC, player_id ASC;";
             if (driver_.prepare_v2(db, sql, -1, &stmt, nullptr) == SQLITE_OK_CODE) {
                 while (driver_.step(stmt) == SQLITE_ROW_CODE) {
@@ -233,6 +272,17 @@ public:
                     p.totalMinutes = driver_.column_int(stmt, 10);
                     p.averageRating = driver_.column_double(stmt, 11);
                     p.currentlyInClub = (driver_.column_int(stmt, 12) != 0);
+                    p.isNewSigning = (driver_.column_int(stmt, 13) != 0);
+                    p.originType = safeText(driver_.column_text(stmt, 14));
+                    if (p.originType.empty()) {
+                        p.originType = p.isNewSigning ? "YOUTH_OR_EXTERNAL" : "ESTABLISHED";
+                    }
+                    p.previousTeamId = driver_.column_int(stmt, 15);
+                    p.previousTeamName = safeText(driver_.column_text(stmt, 16));
+                    p.previousMatchesPlayed = driver_.column_int(stmt, 17);
+                    p.previousAverageRating = driver_.column_double(stmt, 18);
+                    p.previousLeagueStrength = driver_.column_double(stmt, 19);
+                    if (p.previousLeagueStrength <= 0.0) p.previousLeagueStrength = 1.0;
 
                     auto it = teamIdToIdx.find(p.teamId);
                     if (it != teamIdToIdx.end()) {
@@ -274,7 +324,8 @@ public:
                 "salvadas_arquero, corners, faltas, pases, tiros_libres, "
                 "amarillas, rojas, promedio_valoracion, tiros, "
                 "toques_area_rival, offsides, tacles, intercepciones, "
-                "recuperaciones, despejes, tiros_rival_al_arco "
+                "recuperaciones, despejes, tiros_rival_al_arco, "
+                "competition_id, competition_name "
                 "FROM matches ORDER BY debug_id ASC;";
             if (driver_.prepare_v2(db, sql, -1, &stmt, nullptr) == SQLITE_OK_CODE) {
                 while (driver_.step(stmt) == SQLITE_ROW_CODE) {
@@ -291,6 +342,8 @@ public:
                     for (std::size_t i = 0; i < domain::NUM_METRICS; ++i) {
                         m.metrics[i] = driver_.column_double(stmt, static_cast<int>(8 + i));
                     }
+                    m.competitionId = driver_.column_int(stmt, 28);
+                    m.competitionName = safeText(driver_.column_text(stmt, 29));
 
                     auto lIt = lineupsByDebugId.find(m.debugId);
                     if (lIt != lineupsByDebugId.end()) {

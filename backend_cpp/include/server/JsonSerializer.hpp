@@ -80,6 +80,27 @@ public:
         return oss.str();
     }
 
+    static std::string serializeCompetitionsList(const std::vector<domain::Competition>& comps) {
+        std::ostringstream oss;
+        oss << "{\"status\":\"ok\",\"count\":" << comps.size() << ",\"competitions\":[";
+        for (std::size_t i = 0; i < comps.size(); ++i) {
+            if (i > 0) oss << ",";
+            const auto& c = comps[i];
+            oss << "{"
+                << "\"competition_id\":" << c.competitionId << ","
+                << "\"code\":\"" << escape(c.code) << "\","
+                << "\"name\":\"" << escape(c.name) << "\","
+                << "\"short_name\":\"" << escape(c.shortName) << "\","
+                << "\"country\":\"" << escape(c.country) << "\","
+                << "\"confederation\":\"" << escape(c.confederation) << "\","
+                << "\"sofascore_id\":" << c.sofascoreId << ","
+                << "\"strength_factor\":" << num(c.strengthFactor, 2)
+                << "}";
+        }
+        oss << "]}";
+        return oss.str();
+    }
+
     static std::string serializePlayerContribution(const domain::PlayerContribution& pc) {
         std::ostringstream oss;
         oss << "{"
@@ -95,6 +116,14 @@ public:
             << "\"total_minutes\":" << pc.player.totalMinutes << ","
             << "\"average_rating\":" << num(pc.player.averageRating, 2) << ","
             << "\"currently_in_club\":" << (pc.player.currentlyInClub ? "true" : "false") << ","
+            << "\"is_new_signing\":" << (pc.player.isNewSigning ? "true" : "false") << ","
+            << "\"origin_type\":\"" << escape(pc.player.originType) << "\","
+            << "\"previous_team_id\":" << pc.player.previousTeamId << ","
+            << "\"previous_team_name\":\"" << escape(pc.player.previousTeamName) << "\","
+            << "\"previous_matches_played\":" << pc.player.previousMatchesPlayed << ","
+            << "\"previous_average_rating\":" << num(pc.player.previousAverageRating, 2) << ","
+            << "\"previous_league_strength\":" << num(pc.player.previousLeagueStrength, 2) << ","
+            << "\"adaptation_alpha\":" << num(pc.player.adaptationAlpha, 2) << ","
             << "\"input_bit\":" << pc.inputBit << ","
             << "\"tactical_score\":" << num(pc.tacticalScore, 2) << ","
             << "\"column_vector\":[";
@@ -116,6 +145,10 @@ public:
                 << "\"team_id\":" << m.team().teamId << ","
                 << "\"name\":\"" << escape(m.team().name) << "\","
                 << "\"short_name\":\"" << escape(m.team().shortName) << "\","
+                << "\"competition_id\":" << m.team().competitionId << ","
+                << "\"competition_name\":\"" << escape(m.team().competitionName) << "\","
+                << "\"country\":\"" << escape(m.team().country) << "\","
+                << "\"strength_factor\":" << num(m.team().strengthFactor, 2) << ","
                 << "\"squad_size\":" << m.team().squad.size() << ","
                 << "\"matches_count\":" << m.team().matches.size() << ","
                 << "\"matrix_rows\":" << m.transformationMatrix().rows() << ","
@@ -142,6 +175,10 @@ public:
             << "\"team_id\":" << team.teamId << ","
             << "\"name\":\"" << escape(team.name) << "\","
             << "\"short_name\":\"" << escape(team.shortName) << "\","
+            << "\"competition_id\":" << team.competitionId << ","
+            << "\"competition_name\":\"" << escape(team.competitionName) << "\","
+            << "\"country\":\"" << escape(team.country) << "\","
+            << "\"strength_factor\":" << num(team.strengthFactor, 2) << ","
             << "\"squad_size\":" << team.squad.size() << ","
             << "\"matches_count\":" << team.matches.size() << ","
             << "\"matrix_rows\":" << A.rows() << ","
@@ -174,6 +211,9 @@ public:
         oss << "{\"status\":\"ok\","
             << "\"team_id\":" << res.teamId << ","
             << "\"team_name\":\"" << escape(res.teamName) << "\","
+            << "\"competition_id\":" << res.competitionId << ","
+            << "\"competition_name\":\"" << escape(res.competitionName) << "\","
+            << "\"strength_factor\":" << num(res.leagueStrengthFactor, 2) << ","
             << "\"selected_count\":" << res.selectedPlayerIds.size() << ","
             << "\"tactical_score\":" << num(res.tacticalScore, 2) << ","
             << "\"r_squared\":" << num(res.modelFitR2, 4) << ","
@@ -202,6 +242,9 @@ public:
         oss << "{\"status\":\"ok\","
             << "\"team_id\":" << res.teamId << ","
             << "\"team_name\":\"" << escape(res.teamName) << "\","
+            << "\"competition_id\":" << res.competitionId << ","
+            << "\"competition_name\":\"" << escape(res.competitionName) << "\","
+            << "\"strength_factor\":" << num(res.leagueStrengthFactor, 2) << ","
             << "\"strategy\":\"" << escape(res.strategyName) << "\","
             << "\"formation\":\"" << escape(res.formationName) << "\","
             << "\"total_tactical_score\":" << num(res.totalTacticalScore, 2) << ","
@@ -223,7 +266,7 @@ public:
         oss << "],\"bench\":[";
         for (std::size_t i = 0; i < res.recommendedBench.size(); ++i) {
             if (i > 0) oss << ",";
-            oss << serializePlayerContribution(res.recommendedBench[i]);
+            oss << serializePlayerContribution(res.recommendedBench.size() ? res.recommendedBench[i] : domain::PlayerContribution{});
         }
         oss << "]}";
         return oss.str();
@@ -233,9 +276,14 @@ public:
         const auto& cat = domain::getMetricsCatalog();
         std::ostringstream oss;
         oss << "{\"status\":\"ok\","
+            << "\"is_inter_league\":" << (res.isInterLeague ? "true" : "false") << ","
+            << "\"relative_league_ratio\":" << num(res.relativeLeagueRatioAtoB, 3) << ","
             << "\"team_a\":{\"team_id\":" << res.teamAId
             << ",\"name\":\"" << escape(res.teamAName)
-            << "\",\"formation\":\"" << escape(res.teamAFormation)
+            << "\",\"competition_id\":" << res.teamACompetitionId
+            << ",\"competition_name\":\"" << escape(res.teamACompetitionName)
+            << "\",\"strength_factor\":" << num(res.teamAStrengthFactor, 2)
+            << ",\"formation\":\"" << escape(res.teamAFormation)
             << "\",\"expected_goals\":" << num(res.expectedGoalsA, 2)
             << ",\"win_probability\":" << num(res.winProbabilityA, 2)
             << ",\"tactical_edge\":" << num(res.tacticalEdgeScoreA, 2)
@@ -249,7 +297,10 @@ public:
         oss << "]},"
             << "\"team_b\":{\"team_id\":" << res.teamBId
             << ",\"name\":\"" << escape(res.teamBName)
-            << "\",\"formation\":\"" << escape(res.teamBFormation)
+            << "\",\"competition_id\":" << res.teamBCompetitionId
+            << ",\"competition_name\":\"" << escape(res.teamBCompetitionName)
+            << "\",\"strength_factor\":" << num(res.teamBStrengthFactor, 2)
+            << ",\"formation\":\"" << escape(res.teamBFormation)
             << "\",\"expected_goals\":" << num(res.expectedGoalsB, 2)
             << ",\"win_probability\":" << num(res.winProbabilityB, 2)
             << ",\"tactical_edge\":" << num(res.tacticalEdgeScoreB, 2)
@@ -288,9 +339,59 @@ public:
         return oss.str();
     }
 
-    /**
-     * @brief Parsea parámetros tipo query-string (ej: "team_id=7272&players=12709,26464&strategy=BALANCED")
-     */
+    static std::string serializeTransferSimulation(const domain::TransferSimulationResult& res) {
+        domain::PlayerContribution simPc;
+        simPc.player = res.simulatedPlayer;
+        simPc.inputBit = 1;
+        simPc.tacticalScore = res.newPlayerTacticalScore;
+        simPc.columnVector = res.injectedColumnVector;
+
+        std::ostringstream oss;
+        oss << "{\"status\":\"ok\","
+            << "\"target_team_id\":" << res.targetTeamId << ","
+            << "\"target_team_name\":\"" << escape(res.targetTeamName) << "\","
+            << "\"target_competition_name\":\"" << escape(res.targetCompetitionName) << "\","
+            << "\"target_league_strength\":" << num(res.targetLeagueStrength, 2) << ","
+            << "\"source_team_id\":" << res.sourceTeamId << ","
+            << "\"source_team_name\":\"" << escape(res.sourceTeamName) << "\","
+            << "\"source_competition_name\":\"" << escape(res.sourceCompetitionName) << "\","
+            << "\"source_league_strength\":" << num(res.sourceLeagueStrength, 2) << ","
+            << "\"strategy\":\"" << escape(res.strategyName) << "\","
+            << "\"formation\":\"" << escape(res.formationName) << "\","
+            << "\"league_scaling_ratio\":" << num(res.leagueScalingRatio, 3) << ","
+            << "\"adaptation_factor\":" << num(res.adaptationFactor, 2) << ","
+            << "\"replaced_player_id\":" << res.replacedPlayerId << ","
+            << "\"replaced_player_name\":\"" << escape(res.replacedPlayerName) << "\","
+            << "\"replaced_player_score\":" << num(res.replacedPlayerTacticalScore, 2) << ","
+            << "\"new_player_score\":" << num(res.newPlayerTacticalScore, 2) << ","
+            << "\"baseline_tactical_score\":" << num(res.baselineTacticalScore, 2) << ","
+            << "\"post_transfer_tactical_score\":" << num(res.postTransferTacticalScore, 2) << ","
+            << "\"tactical_score_delta\":" << num(res.tacticalScoreDelta, 2) << ","
+            << "\"improvement_pct\":" << num(res.improvementPercentage, 2) << ","
+            << "\"simulated_player\":" << serializePlayerContribution(simPc) << ","
+            << "\"positional_prior_vector\":[";
+        for (std::size_t i = 0; i < res.positionalPriorVector.size(); ++i) {
+            if (i > 0) oss << ",";
+            oss << num(res.positionalPriorVector[i], 3);
+        }
+        oss << "],\"source_differential_vector\":[";
+        for (std::size_t i = 0; i < res.sourceDifferentialVec.size(); ++i) {
+            if (i > 0) oss << ",";
+            oss << num(res.sourceDifferentialVec[i], 3);
+        }
+        oss << "],"
+            << "\"baseline_metrics\":" << serializeMetricsObject(res.baselineMetrics) << ","
+            << "\"post_transfer_metrics\":" << serializeMetricsObject(res.postTransferMetrics) << ","
+            << "\"metrics_comparison\":" << serializeMetricsArray(res.postTransferMetrics, res.baselineMetrics) << ","
+            << "\"post_transfer_starters\":[";
+        for (std::size_t i = 0; i < res.postTransferStarters.size(); ++i) {
+            if (i > 0) oss << ",";
+            oss << serializePlayerContribution(res.postTransferStarters[i]);
+        }
+        oss << "]}";
+        return oss.str();
+    }
+
     static std::unordered_map<std::string, std::string> parseKeyValueParams(const std::string& raw) {
         std::unordered_map<std::string, std::string> params;
         std::size_t start = 0;

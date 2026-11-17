@@ -11,12 +11,14 @@ import tempfile
 import unittest
 
 from sofascore_modulo import (
+    COMPETITIONS_CATALOG,
     LPF_365SCORES_COMPETITION_ID,
     LPF_UNIQUE_TOURNAMENT_ID,
     LigaProfesional365Extractor,
     LigaProfesionalExtractor,
     Public365ScoresClient,
     SofaScoreClient,
+    resolve_competition,
 )
 
 
@@ -79,6 +81,17 @@ def build_mock_transport():
 
         if "/team/3211/events/last/0" in url:
             return {"events": events_page_0, "hasNextPage": False}
+
+        if "/team/3211/players" in url:
+            return {
+                "players": [
+                    {"player": {"id": 101, "name": "Franco Armani", "shortName": "F. Armani", "position": "G", "jerseyNumber": "1"}},
+                    {"player": {"id": 102, "name": "Paulo Díaz", "shortName": "P. Díaz", "position": "D", "jerseyNumber": "17"}},
+                    {"player": {"id": 103, "name": "Jeremías Ledesma", "shortName": "J. Ledesma", "position": "G", "jerseyNumber": "25"}},
+                    # Jugador nuevo en el club sin convocatorias en los últimos 20 partidos (Cold-Start 0 PJ):
+                    {"player": {"id": 999, "name": "Refuerzo Nuevo", "shortName": "R. Nuevo", "position": "F", "jerseyNumber": "9"}},
+                ]
+            }
 
         if "/lineups" in url:
             return {
@@ -191,6 +204,18 @@ class TestSofaScoreModulo(unittest.TestCase):
             self.assertEqual(ledesma["convocatorias_ultimos_20"], "20")
             self.assertEqual(ledesma["partidos_jugados"], "0")
             self.assertEqual(ledesma["partidos_suplente_sin_ingresar"], "20")
+
+            # Verificar que el jugador nuevo en el club sin convocatorias previas (ID 999) se registre con 0 PJ y pertenece_actualmente = 1
+            nuevo = next(r for r in players_rows if r["player_id"] == "999")
+            self.assertEqual(nuevo["convocatorias_ultimos_20"], "0")
+            self.assertEqual(nuevo["partidos_jugados"], "0")
+            self.assertEqual(nuevo["pertenece_actualmente"], "1")
+
+            # Verificar catálogo Multi-Liga
+            self.assertGreaterEqual(len(COMPETITIONS_CATALOG), 10)
+            epl = resolve_competition("EPL")
+            self.assertEqual(epl.competition_id, 7)
+            self.assertGreater(epl.strength_factor, 1.2)
 
             # Verificar métricas del primer partido procesado (idx=22 -> Visitante)
             first_match = metrics_rows[0]

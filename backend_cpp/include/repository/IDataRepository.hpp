@@ -10,13 +10,18 @@ namespace lpf::repository {
 
 /**
  * @class IDataRepository
- * @brief Interfaz abstracta de acceso a datos (Patrón Repository / DAO - Pressman & Ghezzi).
+ * @brief Interfaz abstracta de acceso a datos Multi-Liga (Patrón Repository / DAO - Pressman & Ghezzi).
  *        Desacopla completamente el motor matemático y de negocio en C++ del motor físico
  *        de persistencia (SQLite3 en modo WAL).
  */
 class IDataRepository {
 public:
     virtual ~IDataRepository() = default;
+
+    /**
+     * @brief Carga el catálogo completo de ligas y competiciones registradas.
+     */
+    virtual std::vector<domain::Competition> loadAllCompetitions() = 0;
 
     /**
      * @brief Carga todos los equipos con sus planteles completos, partidos y alineaciones.

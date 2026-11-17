@@ -34,7 +34,7 @@ namespace lpf::server {
 
 /**
  * @class HttpJsonServer
- * @brief Servidor HTTP/JSON concurrente en C++ apoyado en ThreadPool.
+ * @brief Servidor HTTP/JSON concurrente Multi-Liga en C++ apoyado en ThreadPool.
  *        Separa completamente el Backend (lógica de negocio y álgebra lineal en C++)
  *        del Frontend (interfaz de usuario TUI / clientes concurrentes).
  */
@@ -101,7 +101,7 @@ public:
 
         sockaddr_in serverAddr{};
         serverAddr.sin_family = AF_INET;
-        serverAddr.sin_addr.s_addr = htonl(INADDR_LOOPBACK); // 127.0.0.1
+        serverAddr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
         serverAddr.sin_port = htons(static_cast<unsigned short>(port_));
 
         if (bind(listenSocket_, reinterpret_cast<sockaddr*>(&serverAddr), sizeof(serverAddr)) < 0) {
@@ -115,8 +115,9 @@ public:
         }
 
         running_.store(true);
-        std::cout << "[C++ Backend Server] Escuchando en http://127.0.0.1:" << port_
+        std::cout << "[C++ Multi-League Backend Server] Escuchando en http://127.0.0.1:" << port_
                   << " | Worker Threads: " << threadPool_.workerCount()
+                  << " | Competiciones: " << engine_->competitionCount()
                   << " | Equipos cargados: " << engine_->teamCount() << std::endl;
 
         while (running_.load()) {
@@ -143,10 +144,6 @@ public:
         }
     }
 
-    /**
-     * @brief Procesa una petición de ruta y parámetros y devuelve el cuerpo JSON.
-     *        También puede invocarse directamente en modo CLI / pruebas unitarias.
-     */
     std::string dispatchRequest(
         const std::string& path,
         const std::unordered_map<std::string, std::string>& params,
@@ -157,18 +154,24 @@ public:
             if (path == "/api/status") {
                 std::ostringstream oss;
                 oss << "{\"status\":\"ok\","
-                    << "\"engine\":\"LPF Linear Transformation C++17 Backend\","
+                    << "\"engine\":\"Multi-League Linear Transformation C++17 Backend\","
                     << "\"worker_threads\":" << threadPool_.workerCount() << ","
                     << "\"active_tasks\":" << threadPool_.activeTasks() << ","
                     << "\"completed_tasks\":" << threadPool_.completedTasks() << ","
                     << "\"total_compute_us\":" << threadPool_.totalMicroseconds() << ","
+                    << "\"competitions_loaded\":" << engine_->competitionCount() << ","
                     << "\"teams_loaded\":" << engine_->teamCount() << ","
                     << "\"database\":\"" << JsonSerializer::escape(engine_->repositoryInfo()) << "\"}";
                 return oss.str();
             }
 
+            if (path == "/api/competitions") {
+                return JsonSerializer::serializeCompetitionsList(engine_->getAllCompetitions());
+            }
+
             if (path == "/api/teams") {
-                return JsonSerializer::serializeTeamsList(engine_->getAllTeamModels());
+                int compId = getIntParam(params, "competition_id", 0);
+                return JsonSerializer::serializeTeamsList(engine_->getAllTeamModels(compId));
             }
 
             if (path == "/api/team") {
@@ -212,9 +215,36 @@ public:
                 return JsonSerializer::serializeMatchupPrediction(res);
             }
 
+            if (path == "/api/simulate-transfer") {
+                int targetTeamId = getIntParam(params, "target_team_id", 0);
+                int sourceTeamId = getIntParam(params, "source_team_id", 0);
+                int playerId = getIntParam(params, "player_id", 0);
+                int replacePlayerId = getIntParam(params, "replace_player_id", 0);
+                std::string stratCode = getStrParam(params, "strategy", "BALANCED");
+                std::string formation = getStrParam(params, "formation", "AUTO");
+                std::string customName = getStrParam(params, "player_name", "Nuevo Jugador");
+                std::string customPos = getStrParam(params, "position_code", "FWD");
+                double customRat = getDoubleParam(params, "prior_rating", 7.00);
+                double customLeagueStr = getDoubleParam(params, "source_league_strength", 1.00);
+
+                auto res = engine_->simulateTransfer(
+                    targetTeamId,
+                    sourceTeamId,
+                    playerId,
+                    replacePlayerId,
+                    stratCode,
+                    formation,
+                    customName,
+                    customPos,
+                    customRat,
+                    customLeagueStr
+                );
+                return JsonSerializer::serializeTransferSimulation(res);
+            }
+
             if (path == "/api/reload") {
                 engine_->reloadModels();
-                return "{\"status\":\"ok\",\"message\":\"Modelos recargados exitosamente desde SQLite3.\"}";
+                return "{\"status\":\"ok\",\"message\":\"Modelos Multi-Liga recargados exitosamente desde SQLite3.\"}";
             }
 
             outStatusCode = 404;
@@ -235,6 +265,20 @@ private:
         if (it == params.end() || it->second.empty()) return defaultVal;
         try {
             return std::stoi(it->second);
+        } catch (...) {
+            return defaultVal;
+        }
+    }
+
+    static double getDoubleParam(
+        const std::unordered_map<std::string, std::string>& params,
+        const std::string& key,
+        double defaultVal
+    ) {
+        auto it = params.find(key);
+        if (it == params.end() || it->second.empty()) return defaultVal;
+        try {
+            return std::stod(it->second);
         } catch (...) {
             return defaultVal;
         }
@@ -267,7 +311,6 @@ private:
             return;
         }
 
-        // Extraer primera línea HTTP (ej: "GET /api/teams?x=1 HTTP/1.1")
         std::istringstream iss(rawRequest);
         std::string method, target, httpVersion;
         iss >> method >> target >> httpVersion;
@@ -280,7 +323,6 @@ private:
             queryStr = target.substr(qPos + 1);
         }
 
-        // Si hay cuerpo POST urlencoded, combinarlo con queryStr
         std::size_t headerEnd = rawRequest.find("\r\n\r\n");
         if (headerEnd != std::string::npos && headerEnd + 4 < rawRequest.size()) {
             std::string body = rawRequest.substr(headerEnd + 4);

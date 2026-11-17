@@ -72,8 +72,24 @@ inline const std::array<MetricMetadata, NUM_METRICS>& getMetricsCatalog() {
 }
 
 /**
+ * @struct Competition
+ * @brief Entidad que modela una Liga o Competición dentro del sistema Multi-Liga.
+ */
+struct Competition {
+    int competitionId = 72;
+    std::string code = "LPF";
+    std::string name = "Liga Profesional Argentina";
+    std::string shortName = "LPF Argentina";
+    std::string country = "Argentina";
+    std::string confederation = "CONMEBOL";
+    int sofascoreId = 155;
+    double strengthFactor = 1.00;
+};
+
+/**
  * @class Player
- * @brief Entidad de dominio que modela un jugador registrado en el plantel de un equipo.
+ * @brief Entidad de dominio que modela un jugador registrado en el plantel de un equipo,
+ *        incluyendo metadatos de resolución Cold-Start y transferencia entre clubes.
  */
 struct Player {
     int playerId = 0;
@@ -89,6 +105,16 @@ struct Player {
     int totalMinutes = 0;
     double averageRating = 6.5;
     bool currentlyInClub = true; // true si pertenece actualmente al equipo (elegible), false si ya no pertenece
+
+    // Soporte para Jugador Nuevo en un Club (Cold-Start Híbrido: Transferencia + Prior Posicional)
+    bool isNewSigning = false;                 // true si pertenece al club y tiene < 3 PJ en el equipo
+    std::string originType = "ESTABLISHED";    // ESTABLISHED | TRANSFERRED | YOUTH_OR_EXTERNAL | SIMULATED_SIGNING
+    int previousTeamId = 0;                    // ID del club anterior si existe en la BD Multi-Liga
+    std::string previousTeamName;              // Nombre del club anterior
+    int previousMatchesPlayed = 0;             // Partidos jugados en el club de origen
+    double previousAverageRating = 0.0;        // Valoración media en el club de origen
+    double previousLeagueStrength = 1.0;       // Coeficiente de fuerza de la liga de origen
+    double adaptationAlpha = 1.0;              // Peso empírico alpha = PJ / (PJ + 3) in [0, 1]
 };
 
 /**
@@ -158,6 +184,8 @@ struct MatchRecord {
     int opponentId = 0;
     std::string opponentName;
     std::string condition; // Local | Visitante
+    int competitionId = 72;
+    std::string competitionName = "Liga Profesional Argentina";
     MatchMetrics metrics;
     std::vector<MatchLineupSlot> lineup;
 };
@@ -166,6 +194,10 @@ struct Team {
     int teamId = 0;
     std::string name;
     std::string shortName;
+    int competitionId = 72;
+    std::string competitionName = "Liga Profesional Argentina";
+    std::string country = "Argentina";
+    double strengthFactor = 1.00;
     std::vector<Player> squad;
     std::vector<MatchRecord> matches;
 };
@@ -198,6 +230,9 @@ struct PlayerContribution {
 struct BehaviorPredictionResult {
     int teamId = 0;
     std::string teamName;
+    int competitionId = 72;
+    std::string competitionName;
+    double leagueStrengthFactor = 1.0;
     std::vector<int> selectedPlayerIds;
     std::vector<int> binaryAlignmentVector; // x in {0, 1}^n
     MatchMetrics rawLinearOutput;           // A_E * x (sin acotar)
@@ -212,6 +247,9 @@ struct BehaviorPredictionResult {
 struct OptimalLineupResult {
     int teamId = 0;
     std::string teamName;
+    int competitionId = 72;
+    std::string competitionName;
+    double leagueStrengthFactor = 1.0;
     std::string strategyName;
     std::string formationName;
     std::vector<PlayerContribution> optimalStarters;     // 11 titulares óptimos (x_j = 1)
@@ -233,9 +271,19 @@ struct MatchupPredictionResult {
     int teamAId = 0;
     std::string teamAName;
     std::string teamAFormation;
+    int teamACompetitionId = 72;
+    std::string teamACompetitionName;
+    double teamAStrengthFactor = 1.0;
+
     int teamBId = 0;
     std::string teamBName;
     std::string teamBFormation;
+    int teamBCompetitionId = 72;
+    std::string teamBCompetitionName;
+    double teamBStrengthFactor = 1.0;
+
+    bool isInterLeague = false;
+    double relativeLeagueRatioAtoB = 1.0;
 
     MatchMetrics standaloneMetricsA; // T_A(x_A) puro
     MatchMetrics standaloneMetricsB; // T_B(x_B) puro
@@ -253,6 +301,47 @@ struct MatchupPredictionResult {
     std::vector<ScoreProbability> topScorelines;
     std::vector<PlayerContribution> lineupA;
     std::vector<PlayerContribution> lineupB;
+};
+
+/**
+ * @struct TransferSimulationResult
+ * @brief Resultado de simular la incorporación de un jugador nuevo (desde otro club/liga
+ *        o debutante externo) dentro de la matriz A_E de un club destino.
+ */
+struct TransferSimulationResult {
+    int targetTeamId = 0;
+    std::string targetTeamName;
+    std::string targetCompetitionName;
+    double targetLeagueStrength = 1.0;
+
+    int sourceTeamId = 0;
+    std::string sourceTeamName;
+    std::string sourceCompetitionName;
+    double sourceLeagueStrength = 1.0;
+
+    Player simulatedPlayer;
+    int replacedPlayerId = 0;
+    std::string replacedPlayerName;
+    std::string strategyName;
+    std::string formationName;
+
+    double leagueScalingRatio = 1.0;
+    double adaptationFactor = 0.80;
+
+    std::vector<double> injectedColumnVector;   // a_new in R^20
+    std::vector<double> positionalPriorVector;  // a_bar_P in R^20 del club destino
+    std::vector<double> sourceDifferentialVec;  // delta_j del club origen in R^20
+
+    MatchMetrics baselineMetrics;               // Comportamiento del 11 sin el fichaje
+    MatchMetrics postTransferMetrics;           // Comportamiento del 11 con el nuevo jugador
+    double baselineTacticalScore = 0.0;
+    double postTransferTacticalScore = 0.0;
+    double tacticalScoreDelta = 0.0;
+    double improvementPercentage = 0.0;
+    double newPlayerTacticalScore = 0.0;
+    double replacedPlayerTacticalScore = 0.0;
+
+    std::vector<PlayerContribution> postTransferStarters;
 };
 
 } // namespace lpf::domain

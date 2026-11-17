@@ -35,12 +35,182 @@ from urllib.request import Request, urlopen
 
 logger = logging.getLogger(__name__)
 
-# IDs oficiales de Liga Profesional de Fútbol Argentina
+# IDs oficiales de Liga Profesional de Fútbol Argentina (por defecto)
 LPF_365SCORES_COMPETITION_ID = 72
 SCORES365_API_BASE = "https://webws.365scores.com/web"
 
 LPF_UNIQUE_TOURNAMENT_ID = 155
 SOFASCORE_API_BASE = "https://www.sofascore.com/api/v1"
+
+
+@dataclass(frozen=True)
+class CompetitionMetadata:
+    """Metadatos de una Liga o Competición en el sistema Multi-Liga."""
+
+    competition_id: int          # ID canónico (coincide con 365Scores competitionId)
+    code: str                    # Código corto (ej. LPF, EPL, LALIGA, UCL)
+    name: str                    # Nombre completo
+    short_name: str              # Nombre abreviado
+    country: str                 # País o región
+    confederation: str           # CONMEBOL, UEFA, CONCACAF, FIFA
+    sofascore_id: int            # ID de uniqueTournament en SofaScore
+    strength_factor: float       # Coeficiente de fuerza de liga (LPF = 1.00 base)
+
+
+COMPETITIONS_CATALOG: Dict[int, CompetitionMetadata] = {
+    72: CompetitionMetadata(
+        competition_id=72,
+        code="LPF",
+        name="Liga Profesional Argentina",
+        short_name="LPF Argentina",
+        country="Argentina",
+        confederation="CONMEBOL",
+        sofascore_id=155,
+        strength_factor=1.00,
+    ),
+    7: CompetitionMetadata(
+        competition_id=7,
+        code="EPL",
+        name="Premier League",
+        short_name="Premier League",
+        country="Inglaterra",
+        confederation="UEFA",
+        sofascore_id=17,
+        strength_factor=1.32,
+    ),
+    11: CompetitionMetadata(
+        competition_id=11,
+        code="LALIGA",
+        name="LaLiga EA Sports",
+        short_name="LaLiga",
+        country="España",
+        confederation="UEFA",
+        sofascore_id=8,
+        strength_factor=1.26,
+    ),
+    17: CompetitionMetadata(
+        competition_id=17,
+        code="SERIEA",
+        name="Serie A",
+        short_name="Serie A",
+        country="Italia",
+        confederation="UEFA",
+        sofascore_id=23,
+        strength_factor=1.24,
+    ),
+    25: CompetitionMetadata(
+        competition_id=25,
+        code="BUNDESLIGA",
+        name="Bundesliga",
+        short_name="Bundesliga",
+        country="Alemania",
+        confederation="UEFA",
+        sofascore_id=35,
+        strength_factor=1.22,
+    ),
+    35: CompetitionMetadata(
+        competition_id=35,
+        code="LIGUE1",
+        name="Ligue 1",
+        short_name="Ligue 1",
+        country="Francia",
+        confederation="UEFA",
+        sofascore_id=34,
+        strength_factor=1.16,
+    ),
+    113: CompetitionMetadata(
+        competition_id=113,
+        code="BRASILEIRAO",
+        name="Brasileirão Série A",
+        short_name="Brasileirão",
+        country="Brasil",
+        confederation="CONMEBOL",
+        sofascore_id=325,
+        strength_factor=1.12,
+    ),
+    572: CompetitionMetadata(
+        competition_id=572,
+        code="UCL",
+        name="UEFA Champions League",
+        short_name="Champions League",
+        country="Europa",
+        confederation="UEFA",
+        sofascore_id=7,
+        strength_factor=1.34,
+    ),
+    102: CompetitionMetadata(
+        competition_id=102,
+        code="LIBERTADORES",
+        name="CONMEBOL Libertadores",
+        short_name="Libertadores",
+        country="Sudamérica",
+        confederation="CONMEBOL",
+        sofascore_id=384,
+        strength_factor=1.08,
+    ),
+    63: CompetitionMetadata(
+        competition_id=63,
+        code="PRIMEIRA",
+        name="Primeira Liga",
+        short_name="Primeira Liga",
+        country="Portugal",
+        confederation="UEFA",
+        sofascore_id=238,
+        strength_factor=1.10,
+    ),
+    141: CompetitionMetadata(
+        competition_id=141,
+        code="LIGAMX",
+        name="Liga MX",
+        short_name="Liga MX",
+        country="México",
+        confederation="CONCACAF",
+        sofascore_id=352,
+        strength_factor=0.96,
+    ),
+    104: CompetitionMetadata(
+        competition_id=104,
+        code="MLS",
+        name="Major League Soccer",
+        short_name="MLS",
+        country="EE.UU.",
+        confederation="CONCACAF",
+        sofascore_id=242,
+        strength_factor=0.92,
+    ),
+}
+
+
+def resolve_competition(query: str | int) -> CompetitionMetadata:
+    """Resuelve una competición por ID numérico, código corto (ej. EPL, LPF) o nombre."""
+    q_str = str(query).strip()
+    if q_str.isdigit():
+        cid = int(q_str)
+        if cid in COMPETITIONS_CATALOG:
+            return COMPETITIONS_CATALOG[cid]
+        for meta in COMPETITIONS_CATALOG.values():
+            if meta.sofascore_id == cid:
+                return meta
+        return CompetitionMetadata(
+            competition_id=cid,
+            code=f"COMP_{cid}",
+            name=f"Competición {cid}",
+            short_name=f"Comp {cid}",
+            country="Internacional",
+            confederation="FIFA",
+            sofascore_id=cid,
+            strength_factor=1.00,
+        )
+
+    q_up = q_str.upper()
+    for meta in COMPETITIONS_CATALOG.values():
+        if meta.code.upper() == q_up or q_up in meta.name.upper() or q_up in meta.short_name.upper():
+            return meta
+
+    raise ValueError(
+        f"Competición '{query}' no reconocida. Códigos disponibles: "
+        + ", ".join(f"{m.code} ({m.competition_id})" for m in COMPETITIONS_CATALOG.values())
+    )
 
 
 class SofaScoreAccessError(RuntimeError):
@@ -49,7 +219,7 @@ class SofaScoreAccessError(RuntimeError):
 
 @dataclass
 class RegisteredPlayerRecord:
-    """Representa un jugador registrado en las convocatorias de un equipo en los últimos N partidos."""
+    """Representa un jugador registrado en las convocatorias o plantel actual de un equipo."""
 
     team_id: int
     team_name: str
@@ -64,6 +234,8 @@ class RegisteredPlayerRecord:
     total_minutes_played: int = 0
     average_rating: Optional[float] = None
     currently_in_squad: bool = True
+    competition_id: int = LPF_365SCORES_COMPETITION_ID
+    competition_name: str = "Liga Profesional Argentina"
     debug_match_ids: List[str] = field(default_factory=list)
     event_ids: List[int] = field(default_factory=list)
     _ratings_accum: List[float] = field(default_factory=list, repr=False)
@@ -117,6 +289,8 @@ class RegisteredPlayerRecord:
                 self.average_rating if self.average_rating is not None else ""
             ),
             "pertenece_actualmente": 1 if self.currently_in_squad else 0,
+            "competition_id": self.competition_id,
+            "competition_name": self.competition_name,
             "debug_match_ids": ";".join(self.debug_match_ids),
             "event_ids": ";".join(str(eid) for eid in self.event_ids),
         }
@@ -156,6 +330,8 @@ class MatchMetricsRecord:
     recuperaciones: Optional[int]
     despejes: Optional[int]
     tiros_rival_al_arco: Optional[int]
+    competition_id: int = LPF_365SCORES_COMPETITION_ID
+    competition_name: str = "Liga Profesional Argentina"
 
     def to_csv_row(self) -> Dict[str, Any]:
         data = asdict(self)
@@ -392,17 +568,24 @@ class Public365ScoresClient:
         Obtiene los IDs y nombres normalizados de los jugadores que pertenecen
         actualmente al plantel oficial del equipo en 365Scores.
         """
+        athletes = self.get_team_current_squad_athletes(team_id)
+        pids = {int(a["id"]) for a in athletes if "id" in a}
+        names = {_normalize_text(a.get("name", "")) for a in athletes if a.get("name")}
+        return pids, names
+
+    def get_team_current_squad_athletes(self, team_id: int) -> List[Dict[str, Any]]:
+        """
+        Obtiene la lista completa de atletas del plantel oficial actual en 365Scores,
+        permitiendo detectar también fichajes nuevos (0 convocatorias previas).
+        """
         try:
             payload = self.get_json("squads/", {"competitors": team_id})
             squads = payload.get("squads", [])
             if not squads:
-                return set(), set()
-            athletes = squads[0].get("athletes", [])
-            pids = {int(a["id"]) for a in athletes if "id" in a}
-            names = {_normalize_text(a.get("name", "")) for a in athletes if a.get("name")}
-            return pids, names
+                return []
+            return list(squads[0].get("athletes", []))
         except Exception:
-            return set(), set()
+            return []
 
 
 # Mapeo de IDs de estadísticas de equipo en 365Scores
@@ -557,6 +740,7 @@ class LigaProfesional365Extractor:
                             has_player_recoveries = True
 
                 if player_id not in players_registry:
+                    comp_meta = resolve_competition(self.competition_id)
                     players_registry[player_id] = RegisteredPlayerRecord(
                         team_id=team_id,
                         team_name=team_name,
@@ -565,6 +749,8 @@ class LigaProfesional365Extractor:
                         short_name=short_name,
                         position=pos_name,
                         jersey_number=jersey,
+                        competition_id=comp_meta.competition_id,
+                        competition_name=comp_meta.name,
                     )
 
                 canonical_name = players_registry[player_id].player_name or player_name
@@ -712,15 +898,60 @@ class LigaProfesional365Extractor:
                     if tiros_rival_arco_val is not None
                     else None
                 ),
+                competition_id=resolve_competition(self.competition_id).competition_id,
+                competition_name=resolve_competition(self.competition_id).name,
             )
             match_records.append(match_record)
 
-        current_pids, current_names = self.client.get_team_current_squad(team_id)
+        squad_athletes = self.client.get_team_current_squad_athletes(team_id)
+        current_pids = {int(a["id"]) for a in squad_athletes if "id" in a}
+        current_names = {
+            _normalize_text(a.get("name", ""))
+            for a in squad_athletes
+            if a.get("name")
+        }
         if current_pids or current_names:
             for p_rec in players_registry.values():
                 p_rec.currently_in_squad = (
                     p_rec.player_id in current_pids
                     or _normalize_text(p_rec.player_name) in current_names
+                )
+            # Registrar también jugadores nuevos en el club (en el plantel actual pero con 0 convocatorias previas)
+            existing_norm_names = {
+                _normalize_text(p_rec.player_name)
+                for p_rec in players_registry.values()
+            }
+            comp_meta = resolve_competition(self.competition_id)
+            for ath in squad_athletes:
+                aid = int(ath.get("id", 0))
+                aname = str(ath.get("name", "")).strip()
+                if not aid or not aname:
+                    continue
+                if aid in players_registry or _normalize_text(aname) in existing_norm_names:
+                    continue
+                ashort = str(ath.get("shortName", aname)).strip()
+                ajersey = str(ath.get("jerseyNumber", "") or "").strip()
+                apos = str(
+                    ath.get("position", {}).get("name")
+                    if isinstance(ath.get("position"), dict)
+                    else (ath.get("positionName") or ath.get("position") or "")
+                ).strip()
+                players_registry[aid] = RegisteredPlayerRecord(
+                    team_id=team_id,
+                    team_name=team_name,
+                    player_id=aid,
+                    player_name=aname,
+                    short_name=ashort,
+                    position=apos,
+                    jersey_number=ajersey,
+                    convocations_count=0,
+                    matches_played_count=0,
+                    matches_unused_sub_count=0,
+                    total_minutes_played=0,
+                    average_rating=None,
+                    currently_in_squad=True,
+                    competition_id=comp_meta.competition_id,
+                    competition_name=comp_meta.name,
                 )
 
         return list(players_registry.values()), match_records
@@ -955,14 +1186,31 @@ class SofaScoreClient:
         return self.get_json(f"/event/{event_id}/lineups")
 
     def get_team_current_squad(self, team_id: int) -> Tuple[set[int], set[str]]:
+        athletes = self.get_team_current_squad_athletes(team_id)
+        pids = {int(a["id"]) for a in athletes if "id" in a}
+        names = {_normalize_text(a.get("name", "")) for a in athletes if a.get("name")}
+        return pids, names
+
+    def get_team_current_squad_athletes(self, team_id: int) -> List[Dict[str, Any]]:
         try:
             data = self.get_json(f"/team/{team_id}/players")
             players = data.get("players", [])
-            pids = {int(p.get("player", {}).get("id", 0)) for p in players if p.get("player", {}).get("id")}
-            names = {_normalize_text(p.get("player", {}).get("name", "")) for p in players if p.get("player", {}).get("name")}
-            return pids, names
+            out: List[Dict[str, Any]] = []
+            for p_entry in players:
+                p_info = p_entry.get("player", {})
+                if "id" in p_info:
+                    out.append(
+                        {
+                            "id": int(p_info["id"]),
+                            "name": str(p_info.get("name", "")).strip(),
+                            "shortName": str(p_info.get("shortName", p_info.get("name", ""))).strip(),
+                            "position": str(p_info.get("position", "")).strip(),
+                            "jerseyNumber": str(p_info.get("jerseyNumber", p_info.get("shirtNumber", "")) or "").strip(),
+                        }
+                    )
+            return out
         except Exception:
-            return set(), set()
+            return []
 
 
 def extract_all_period_stats(
@@ -1297,15 +1545,52 @@ class LigaProfesionalExtractor:
                     else None
                 ),
                 tiros_rival_al_arco=tiros_rival_al_arco,
+                competition_id=resolve_competition(self.unique_tournament_id).competition_id,
+                competition_name=resolve_competition(self.unique_tournament_id).name,
             )
             match_records.append(match_record)
 
-        current_pids, current_names = self.client.get_team_current_squad(team_id)
+        squad_athletes = self.client.get_team_current_squad_athletes(team_id)
+        current_pids = {int(a["id"]) for a in squad_athletes if "id" in a}
+        current_names = {
+            _normalize_text(a.get("name", ""))
+            for a in squad_athletes
+            if a.get("name")
+        }
         if current_pids or current_names:
             for p_rec in players_registry.values():
                 p_rec.currently_in_squad = (
                     p_rec.player_id in current_pids
                     or _normalize_text(p_rec.player_name) in current_names
+                )
+            existing_norm_names = {
+                _normalize_text(p_rec.player_name)
+                for p_rec in players_registry.values()
+            }
+            comp_meta = resolve_competition(self.unique_tournament_id)
+            for ath in squad_athletes:
+                aid = int(ath.get("id", 0))
+                aname = str(ath.get("name", "")).strip()
+                if not aid or not aname:
+                    continue
+                if aid in players_registry or _normalize_text(aname) in existing_norm_names:
+                    continue
+                players_registry[aid] = RegisteredPlayerRecord(
+                    team_id=team_id,
+                    team_name=team_name,
+                    player_id=aid,
+                    player_name=aname,
+                    short_name=str(ath.get("shortName", aname)).strip(),
+                    position=str(ath.get("position", "")).strip(),
+                    jersey_number=str(ath.get("jerseyNumber", "")).strip(),
+                    convocations_count=0,
+                    matches_played_count=0,
+                    matches_unused_sub_count=0,
+                    total_minutes_played=0,
+                    average_rating=None,
+                    currently_in_squad=True,
+                    competition_id=comp_meta.competition_id,
+                    competition_name=comp_meta.name,
                 )
 
         return list(players_registry.values()), match_records
@@ -1354,6 +1639,8 @@ def export_players_csv(
         "minutos_totales",
         "promedio_valoracion",
         "pertenece_actualmente",
+        "competition_id",
+        "competition_name",
         "debug_match_ids",
         "event_ids",
     ]
@@ -1402,6 +1689,8 @@ def export_metrics_csv(
         "recuperaciones",
         "despejes",
         "tiros_rival_al_arco",
+        "competition_id",
+        "competition_name",
     ]
     with path.open("w", newline="", encoding="utf-8-sig") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -1421,7 +1710,8 @@ def main() -> None:
 
     parser = argparse.ArgumentParser(
         description=(
-            "Extrae los últimos 20 partidos de Liga Profesional Argentina por equipo "
+            "Extrae los últimos 20 partidos por equipo de cualquier Liga o Competición "
+            "(Multi-Liga: LPF, EPL, LaLiga, Serie A, Bundesliga, Ligue 1, Brasileirão, Libertadores, UCL) "
             "y genera dos archivos CSV (jugadores registrados y métricas por partido)."
         )
     )
@@ -1430,6 +1720,16 @@ def main() -> None:
         choices=("365scores", "sofascore"),
         default="365scores",
         help="Proveedor de API pública a utilizar (default: 365scores, funciona en vivo sin llaves ni bloqueos)",
+    )
+    parser.add_argument(
+        "--competition",
+        default="LPF",
+        help="Código o ID de la liga/competición (ej: LPF, EPL, LALIGA, SERIEA, BUNDESLIGA, BRASILEIRAO, LIBERTADORES, UCL, 72)",
+    )
+    parser.add_argument(
+        "--list-competitions",
+        action="store_true",
+        help="Listar todas las ligas y competiciones preconfiguradas con sus IDs y coeficientes de fuerza",
     )
     parser.add_argument(
         "--players-out",
@@ -1445,7 +1745,7 @@ def main() -> None:
         "--matches",
         type=int,
         default=20,
-        help="Cantidad de últimos partidos de LPF por equipo (default: 20)",
+        help="Cantidad de últimos partidos por equipo (default: 20)",
     )
     parser.add_argument(
         "--team",
@@ -1458,7 +1758,7 @@ def main() -> None:
     parser.add_argument(
         "--list-teams",
         action="store_true",
-        help="Listar todos los equipos disponibles de la Liga Profesional con sus IDs y salir",
+        help="Listar todos los equipos disponibles de la liga seleccionada con sus IDs y salir",
     )
     parser.add_argument(
         "--max-teams",
@@ -1474,15 +1774,27 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    if args.list_competitions:
+        print("=== CATÁLOGO MULTI-LIGA Y COMPETICIONES ===")
+        for meta in COMPETITIONS_CATALOG.values():
+            print(
+                f"[{meta.code:<12}] ID 365: {meta.competition_id:<4} | SofaScore: {meta.sofascore_id:<4} | "
+                f"Fuerza: {meta.strength_factor:.2f} | {meta.name} ({meta.country} - {meta.confederation})"
+            )
+        return
+
+    comp_meta = resolve_competition(args.competition)
+
     if args.provider == "365scores":
         client_365 = Public365ScoresClient(delay_seconds=args.delay)
         if args.list_teams:
-            for t in client_365.get_lpf_teams():
-                print(f"ID: {t['id']:<6} | Nombre: {t['name']}")
+            for t in client_365.get_lpf_teams(comp_meta.competition_id):
+                print(f"ID: {t['id']:<6} | Nombre: {t['name']} ({comp_meta.name})")
             return
 
         extractor_365 = LigaProfesional365Extractor(
             client=client_365,
+            competition_id=comp_meta.competition_id,
             matches_per_team=args.matches,
         )
         p_path, m_path = extractor_365.run_all_teams(
@@ -1495,6 +1807,7 @@ def main() -> None:
         client_sf = SofaScoreClient(delay_seconds=args.delay)
         extractor_sf = LigaProfesionalExtractor(
             client=client_sf,
+            unique_tournament_id=comp_meta.sofascore_id,
             matches_per_team=args.matches,
         )
         p_path, m_path = extractor_sf.run_all_teams(

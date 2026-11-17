@@ -1,4 +1,4 @@
-# =============================================================================
+﻿# =============================================================================
 # Script Dinámico Multi-Dispositivo de Compilación C++17 y Base de Datos SQLite3
 # No utiliza rutas absolutas fijas: detecta automáticamente la carpeta raíz del
 # proyecto, el intérprete de Python, sqlite3.dll y el compilador g++ (MinGW/CLion).
@@ -16,9 +16,22 @@ function Find-PythonCommand {
             try {
                 $ver = & $cmd --version 2>&1
                 if ($LASTEXITCODE -eq 0 -and $ver -match "Python") {
-                    return $cmd
+                    return $found.Source
                 }
             } catch {}
+        }
+    }
+    $pyPatterns = @(
+        "$env:LOCALAPPDATA\Programs\Python\Python*\python.exe",
+        "$env:ProgramFiles\Python*\python.exe",
+        "C:\Python*\python.exe",
+        "$env:USERPROFILE\anaconda3\python.exe",
+        "$env:USERPROFILE\miniconda3\python.exe"
+    )
+    foreach ($pattern in $pyPatterns) {
+        $matches = Get-Item $pattern -ErrorAction SilentlyContinue | Sort-Object FullName -Descending
+        if ($matches) {
+            return $matches[0].FullName
         }
     }
     throw "No se encontró una instalación válida de Python en este dispositivo."
@@ -50,12 +63,12 @@ function Find-GppCompiler {
     throw "No se encontró el compilador g++.exe (MinGW-w64 / CLion) en este dispositivo."
 }
 
+# Detener instancia previa de lpf_backend si estuviera corriendo para liberar los binarios y la BD
+Get-Process -Name "lpf_backend" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+
 $PyCmd = Find-PythonCommand
 Write-Host "[1/3] Inicializando Base de Datos SQLite3 usando '$PyCmd'..." -ForegroundColor Cyan
 & $PyCmd "database/db_manager.py" --init --stats
-
-# Detener instancia previa de lpf_backend si estuviera corriendo para liberar los binarios
-Get-Process -Name "lpf_backend" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
 
 New-Item -ItemType Directory -Force -Path "bin" | Out-Null
 

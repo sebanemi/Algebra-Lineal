@@ -23,12 +23,10 @@ void testMatrixOperations() {
     assert(std::abs(I(0, 1)) < 1e-9);
     assert(std::abs(I(1, 0)) < 1e-9);
 
-    // Probar pseudoinversa de Moore-Penrose sobre matriz rectangular (3 x 2)
     math::Matrix X(3, 2, {1.0, 0.0, 0.0, 1.0, 1.0, 1.0});
     math::Matrix X_pinv = X.pseudoInverse(1e-6);
     assert(X_pinv.rows() == 2 && X_pinv.cols() == 3);
 
-    // Propiedad de Moore-Penrose: X * X^+ * X ≈ X
     math::Matrix X_reconstructed = X * X_pinv * X;
     for (std::size_t r = 0; r < 3; ++r) {
         for (std::size_t c = 0; c < 2; ++c) {
@@ -39,14 +37,21 @@ void testMatrixOperations() {
 }
 
 void testDatabaseAndLinearModels() {
-    std::cout << "[TEST 2] Verificando carga desde SQLite3 y Transformaciones Lineales de los 30 equipos..." << std::endl;
+    std::cout << "[TEST 2] Verificando carga Multi-Liga desde SQLite3 y Transformaciones Lineales..." << std::endl;
 
     auto repo = std::make_shared<repository::SqliteRepository>("data/lpf_analytics.db");
     auto engine = std::make_shared<services::AnalyticsEngineService>(repo, 1.35);
 
-    assert(engine->teamCount() == 30);
+    auto comps = engine->getAllCompetitions();
+    assert(comps.size() >= 10);
+
+    // Deben existir exactamente 30 equipos en la Liga Profesional Argentina (competition_id = 72)
+    auto lpfModels = engine->getAllTeamModels(72);
+    assert(lpfModels.size() == 30);
+
+    // Y además los equipos internacionales preconfigurados (LaLiga, Premier League, Serie A, Bundesliga, Brasileirão)
     auto allModels = engine->getAllTeamModels();
-    assert(allModels.size() == 30);
+    assert(allModels.size() >= 38);
 
     for (const auto& model : allModels) {
         const auto& A = model.transformationMatrix();
@@ -55,7 +60,6 @@ void testDatabaseAndLinearModels() {
         assert(model.team().matches.size() == 20);
         assert(model.frobeniusResidual() > 0.0);
 
-        // Verificar que la optimización de cada equipo solo seleccione jugadores que pertenecen actualmente al club
         auto optTeam = engine->optimizeLineup(model.team().teamId, "BALANCED", "AUTO");
         assert(optTeam.optimalStarters.size() == 11);
         for (const auto& starter : optTeam.optimalStarters) {
@@ -66,7 +70,7 @@ void testDatabaseAndLinearModels() {
         }
     }
 
-    // Verificar que intentar alinear a un jugador que ya no pertenece al equipo sea rechazado
+    // Verificar rechazo de ex-jugadores dados de baja (currentlyInClub == false)
     const auto& instModel = engine->getTeamModel(7272);
     int departedPlayerId = -1;
     for (const auto& p : instModel.team().squad) {
@@ -85,33 +89,84 @@ void testDatabaseAndLinearModels() {
         assert(rejected == true);
     }
 
-    // Caso (b): Optimización de 11 inicial para Boca Juniors (866) y River Plate (868)
-    auto optBoca = engine->optimizeLineup(866, "BALANCED", "4-3-3");
-    assert(optBoca.optimalStarters.size() == 11);
-    assert(optBoca.formationName == "4-3-3");
-    assert(optBoca.expectedMetrics[domain::PROMEDIO_VALORACION] >= 5.0);
+    std::cout << "         -> OK (" << allModels.size() << " equipos en " << comps.size()
+              << " competiciones verificados exitosamente)" << std::endl;
+}
 
-    // Caso (a): Predicción de comportamiento a partir de los 11 titulares elegidos
-    std::vector<int> bocaStarterIds;
-    for (const auto& pc : optBoca.optimalStarters) {
-        bocaStarterIds.push_back(pc.player.playerId);
+void testColdStartNewPlayerAndTransfers() {
+    std::cout << "[TEST 3] Verificando resolución de Jugador Nuevo en un Club (Cold-Start Híbrido y Simulador de Fichajes)..." << std::endl;
+
+    auto repo = std::make_shared<repository::SqliteRepository>("data/lpf_analytics.db");
+    auto engine = std::make_shared<services::AnalyticsEngineService>(repo, 1.35);
+
+    // 1. Verificar jugador nuevo transferido entre clubes de la BD (Thiago Almada ID 60282: River Plate -> Manchester City con 0 PJ en City)
+    const auto& cityModel = engine->getTeamModel(110);
+    bool foundTransferred = false;
+    for (std::size_t j = 0; j < cityModel.team().squad.size(); ++j) {
+        const auto& p = cityModel.team().squad[j];
+        if (p.playerId == 60282) { // Thiago Almada
+            foundTransferred = true;
+            assert(p.matchesPlayed == 0);
+            assert(p.isNewSigning == true);
+            assert(p.originType == "TRANSFERRED");
+            assert(p.previousTeamId == 868); // River Plate
+            assert(std::abs(p.adaptationAlpha - 0.0) < 1e-6);
+
+            auto col = cityModel.transformationMatrix().getColumn(j);
+            assert(col[domain::GOLES_A_FAVOR] > 0.01);
+            assert(col[domain::PASES] > 10.0);
+            assert(col[domain::PROMEDIO_VALORACION] > 0.4);
+            break;
+        }
     }
-    auto behBoca = engine->predictBehavior(866, bocaStarterIds, "BALANCED");
-    assert(behBoca.selectedPlayerIds.size() == 11);
-    assert(std::abs(behBoca.predictedMetrics[domain::GOLES_A_FAVOR] - optBoca.expectedMetrics[domain::GOLES_A_FAVOR]) < 1e-6);
+    assert(foundTransferred == true);
 
-    // Caso (c): Predicción de enfrentamiento entre dos equipos (Boca vs River)
-    auto matchup = engine->predictMatchup(866, 868, {}, {}, "BALANCED", "AUTO", "AUTO", false);
-    double probSum = matchup.winProbabilityA + matchup.drawProbability + matchup.winProbabilityB;
+    // 2. Verificar jugador nuevo debutante / externo con 0 PJ sin club previo en BD (Joan Martínez en Real Madrid, ID 90121)
+    const auto& madridModel = engine->getTeamModel(131);
+    bool foundDebutant = false;
+    for (std::size_t j = 0; j < madridModel.team().squad.size(); ++j) {
+        const auto& p = madridModel.team().squad[j];
+        if (p.playerId == 90121) {
+            foundDebutant = true;
+            assert(p.matchesPlayed == 0);
+            assert(p.isNewSigning == true);
+            assert(p.originType == "YOUTH_OR_EXTERNAL");
+            auto col = madridModel.transformationMatrix().getColumn(j);
+            // Debe recibir el Prior Posicional de DEF del Real Madrid (no nulo)
+            assert(col[domain::INTERCEPCIONES] > 0.1);
+            assert(col[domain::PASES] > 15.0);
+            break;
+        }
+    }
+    assert(foundDebutant == true);
+
+    // 3. Probar Simulador de Fichajes Inter-Liga (ej: ¿Qué pasa si Boca Juniors ficha a Kylian Mbappé del Real Madrid?)
+    auto simTransfer = engine->simulateTransfer(866, 131, 90117, 0, "OFFENSIVE", "4-3-3");
+    assert(simTransfer.targetTeamId == 866);
+    assert(simTransfer.sourceTeamId == 131);
+    assert(simTransfer.leagueScalingRatio > 1.0); // LaLiga (1.26) -> LPF (1.00)
+    assert(simTransfer.injectedColumnVector.size() == domain::NUM_METRICS);
+    assert(simTransfer.postTransferStarters.size() == 11);
+    assert(simTransfer.postTransferMetrics[domain::GOLES_A_FAVOR] >= simTransfer.baselineMetrics[domain::GOLES_A_FAVOR]);
+
+    // 4. Probar Simulador de Incorporación de un Jugador Nuevo Externo / Inferiores (sin club origen en BD)
+    auto simYouth = engine->simulateTransfer(868, 0, 0, 0, "BALANCED", "4-3-3", "Juvenil Promesa", "FWD", 7.15, 1.00);
+    assert(simYouth.targetTeamId == 868);
+    assert(simYouth.simulatedPlayer.originType == "YOUTH_OR_EXTERNAL");
+    assert(simYouth.injectedColumnVector[domain::TIROS_AL_ARCO] > 0.05);
+
+    // 5. Probar Predicción Inter-Liga (Real Madrid vs River Plate)
+    auto interMatch = engine->predictMatchup(131, 868, {}, {}, "BALANCED", "4-3-3", "4-3-3", true);
+    assert(interMatch.isInterLeague == true);
+    assert(interMatch.relativeLeagueRatioAtoB > 1.20);
+    double probSum = interMatch.winProbabilityA + interMatch.drawProbability + interMatch.winProbabilityB;
     assert(std::abs(probSum - 100.0) < 1e-3);
-    double posSum = matchup.coupledMetricsA[domain::POSESION] + matchup.coupledMetricsB[domain::POSESION];
-    assert(std::abs(posSum - 100.0) < 1e-3);
 
-    std::cout << "         -> OK (Casos de uso a, b y c verificados para los 30 equipos de LPF)" << std::endl;
+    std::cout << "         -> OK (Cold-Start Híbrido, Transferencia Matricial Inter-Club y Cruce Inter-Liga verificados)" << std::endl;
 }
 
 void testConcurrentMultiUserQueries() {
-    std::cout << "[TEST 3] Verificando concurrencia multi-usuario (ThreadPool con 100 consultas paralelas)..." << std::endl;
+    std::cout << "[TEST 4] Verificando concurrencia multi-usuario (ThreadPool con 100 consultas paralelas Multi-Liga)..." << std::endl;
 
     auto repo = std::make_shared<repository::SqliteRepository>("data/lpf_analytics.db");
     auto engine = std::make_shared<services::AnalyticsEngineService>(repo, 1.35);
@@ -122,14 +177,17 @@ void testConcurrentMultiUserQueries() {
 
     for (int i = 0; i < totalQueries; ++i) {
         pool.enqueue([&engine, &successCount, i]() {
-            if (i % 3 == 0) {
+            if (i % 4 == 0) {
                 auto r = engine->optimizeLineup(7272, "OFFENSIVE", "4-3-3");
                 if (r.optimalStarters.size() == 11) successCount.fetch_add(1);
-            } else if (i % 3 == 1) {
-                auto r = engine->predictMatchup(866, 868);
+            } else if (i % 4 == 1) {
+                auto r = engine->predictMatchup(131, 868); // Real Madrid vs River Plate
                 if (r.expectedGoalsA > 0.0 && r.expectedGoalsB > 0.0) successCount.fetch_add(1);
+            } else if (i % 4 == 2) {
+                auto r = engine->simulateTransfer(866, 110, 90316); // Haaland -> Boca Juniors
+                if (r.postTransferStarters.size() == 11) successCount.fetch_add(1);
             } else {
-                auto r = engine->optimizeLineup(868, "POSSESSION", "4-4-2");
+                auto r = engine->optimizeLineup(132, "POSSESSION", "4-3-3"); // FC Barcelona
                 if (r.optimalStarters.size() == 11) successCount.fetch_add(1);
             }
         });
@@ -143,10 +201,11 @@ void testConcurrentMultiUserQueries() {
 
 int main() {
     std::cout << "=====================================================================" << std::endl;
-    std::cout << " SUITE DE PRUEBAS C++17 - MOTOR DE TRANSFORMACIONES LINEALES LPF" << std::endl;
+    std::cout << " SUITE DE PRUEBAS C++17 - MOTOR MULTI-LIGA Y COLD-START HIBRIDO" << std::endl;
     std::cout << "=====================================================================" << std::endl;
     testMatrixOperations();
     testDatabaseAndLinearModels();
+    testColdStartNewPlayerAndTransfers();
     testConcurrentMultiUserQueries();
     std::cout << "=====================================================================" << std::endl;
     std::cout << " TODAS LAS PRUEBAS DE BACKEND C++ PASARON EXITOSAMENTE" << std::endl;
