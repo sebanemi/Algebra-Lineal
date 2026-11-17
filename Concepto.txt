@@ -1,0 +1,10 @@
+El proyecto basa su funcionamiento en transformaciones lineales. La idea es obtener una matriz por cada equipo mediante la transformación de la alineación del equipo. Se deben tener en cuenta los jugadores iniciales, los sustitutos y los convocados que no formaron parte del encuentro, tomando 1 si jugó o 0 de lo contrario. Por cada partido, lo que nos interesa obtener es: Goles a favor, goles en contra, tiros al aarco, posesión, salvadas, corners, faltas, pases, tiros libres, amarillas, rojas, promedio de valoración del equipo, tiros, toques en el área rival, offsides, tacles, intercepciones, recuperaciones, despejes y tiros del rival al arco propio. 
+
+El sistema debe cumplir con dos cosas:
+a. Un equipo ingresa su equipo inicial y el sistema devuelve el comportamiento que debería tener el equipo. 
+b. Un equipo se ingresa y el sistema devuelve el equipo inicial que le de el mejor rendimiento posible
+c. El sistema debe permitir hacer cálculos para, entre dos equipos, obtener predicciones en base a los rendimientos de cada equipo.
+
+Desarrollá el sistema de forma modular implementando los conceptos y las mejores prácticas del paradigma orientado a objetos. El sistema desde el inicio debe estar preparado para soportar muchos usuarios y consultas a la vez. Separá Frontend, Backend y base de datos. Hagamos una primer versión que sea en terminal y tenga un cierto nivel de interfaz gráfica de forma que sea sencillo de usar. Toda la lógica del sistema debe estar escrita en C++ para poder optimizar los cálculos y la matemática compleja. Sin embargo, la lógica de obtención de los datos ya está hecha en Python. 
+
+En caso de haber algo que no entiendas, pregúntamelo. No olvides documentar todo como un ingeniero de Software senior, redactar requerimientos, usar diagramas UML, usar conceptos de Pressman y Ghezzi.
