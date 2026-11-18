@@ -37,8 +37,10 @@ CREATE TABLE IF NOT EXISTS players (
     team_id INTEGER NOT NULL,
     name TEXT NOT NULL,
     short_name TEXT NOT NULL,
-    position TEXT NOT NULL,          -- Portero, Defensor, Mediocampista, Delantero
-    position_code TEXT NOT NULL,     -- GK, DEF, MID, FWD
+    position TEXT NOT NULL,                 -- Línea Macro: Portero, Defensor, Mediocampista, Delantero
+    position_code TEXT NOT NULL,            -- Código Macro: GK, DEF, MID, FWD
+    specific_position TEXT NOT NULL DEFAULT 'Mediocentro', -- Sub-posición: Lateral Izquierdo, Defensor Central, Mediocentro Defensivo, etc.
+    specific_position_code TEXT NOT NULL DEFAULT 'MC',     -- Código Específico: POR | LI, LD, DFC | MCD, MC, MCO, MI, MD | DC, EI, ED, SD
     jersey_number TEXT DEFAULT '',
     convocations_last_20 INTEGER DEFAULT 0,
     matches_played INTEGER DEFAULT 0,

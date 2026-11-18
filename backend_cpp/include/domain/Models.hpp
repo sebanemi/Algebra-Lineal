@@ -89,15 +89,18 @@ struct Competition {
 /**
  * @class Player
  * @brief Entidad de dominio que modela un jugador registrado en el plantel de un equipo,
- *        incluyendo metadatos de resolución Cold-Start y transferencia entre clubes.
+ *        incluyendo posición de línea macro, sub-posición táctica específica y metadatos
+ *        de resolución Cold-Start / transferencia entre clubes.
  */
 struct Player {
     int playerId = 0;
     int teamId = 0;
     std::string name;
     std::string shortName;
-    std::string position;     // Portero, Defensor, Mediocampista, Delantero
-    std::string positionCode; // GK, DEF, MID, FWD
+    std::string position = "Mediocampista";         // Portero, Defensor, Mediocampista, Delantero
+    std::string positionCode = "MID";               // GK, DEF, MID, FWD
+    std::string specificPosition = "Mediocentro";   // Portero, Defensor Central, Lateral Izquierdo/Derecho, MCD, MC, MCO, MI, MD, DC, EI, ED, SD
+    std::string specificPositionCode = "MC";        // POR | DFC, LI, LD | MCD, MC, MCO, MI, MD | DC, EI, ED, SD
     std::string jerseyNumber;
     int convocationsLast20 = 0;
     int matchesPlayed = 0;
@@ -116,6 +119,40 @@ struct Player {
     double previousLeagueStrength = 1.0;       // Coeficiente de fuerza de la liga de origen
     double adaptationAlpha = 1.0;              // Peso empírico alpha = PJ / (PJ + 3) in [0, 1]
 };
+
+struct PositionTaxonomyEntry {
+    const char* specificCode;
+    const char* specificName;
+    const char* macroCode;
+    const char* macroName;
+};
+
+inline PositionTaxonomyEntry resolvePositionTaxonomy(const std::string& rawCode) {
+    static const std::array<PositionTaxonomyEntry, 13> table = {{
+        {"POR", "Portero",                 "GK",  "Portero"},
+        {"DFC", "Defensor Central",        "DEF", "Defensor"},
+        {"LI",  "Lateral Izquierdo",       "DEF", "Defensor"},
+        {"LD",  "Lateral Derecho",         "DEF", "Defensor"},
+        {"MCD", "Mediocentro Defensivo",   "MID", "Mediocampista"},
+        {"MC",  "Mediocentro",             "MID", "Mediocampista"},
+        {"MCO", "Mediocentro Ofensivo",    "MID", "Mediocampista"},
+        {"MI",  "Mediocampista Izquierdo", "MID", "Mediocampista"},
+        {"MD",  "Mediocampista Derecho",   "MID", "Mediocampista"},
+        {"DC",  "Delantero Centro",        "FWD", "Delantero"},
+        {"EI",  "Extremo Izquierdo",       "FWD", "Delantero"},
+        {"ED",  "Extremo Derecho",         "FWD", "Delantero"},
+        {"SD",  "Segundo Delantero",       "FWD", "Delantero"}
+    }};
+    for (const auto& entry : table) {
+        if (rawCode == entry.specificCode) {
+            return entry;
+        }
+    }
+    if (rawCode == "GK")  return table[0];
+    if (rawCode == "DEF") return table[1];
+    if (rawCode == "FWD") return table[9];
+    return table[5]; // Default MC / MID
+}
 
 /**
  * @class MatchMetrics

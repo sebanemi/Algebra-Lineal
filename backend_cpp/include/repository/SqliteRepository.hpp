@@ -246,11 +246,12 @@ public:
             }
         }
 
-        // 2. Cargar Jugadores Registrados por Equipo (incluyendo soporte Cold-Start y Transferencias)
+        // 2. Cargar Jugadores Registrados por Equipo (incluyendo sub-posición táctica, soporte Cold-Start y Transferencias)
         {
             sqlite3_stmt* stmt = nullptr;
             const char* sql =
                 "SELECT player_id, team_id, name, short_name, position, position_code, "
+                "specific_position, specific_position_code, "
                 "jersey_number, convocations_last_20, matches_played, matches_unused_sub, "
                 "total_minutes, average_rating, currently_in_club, "
                 "is_new_signing, origin_type, previous_team_id, previous_team_name, "
@@ -265,23 +266,30 @@ public:
                     p.shortName = safeText(driver_.column_text(stmt, 3));
                     p.position = safeText(driver_.column_text(stmt, 4));
                     p.positionCode = safeText(driver_.column_text(stmt, 5));
-                    p.jerseyNumber = safeText(driver_.column_text(stmt, 6));
-                    p.convocationsLast20 = driver_.column_int(stmt, 7);
-                    p.matchesPlayed = driver_.column_int(stmt, 8);
-                    p.matchesUnusedSub = driver_.column_int(stmt, 9);
-                    p.totalMinutes = driver_.column_int(stmt, 10);
-                    p.averageRating = driver_.column_double(stmt, 11);
-                    p.currentlyInClub = (driver_.column_int(stmt, 12) != 0);
-                    p.isNewSigning = (driver_.column_int(stmt, 13) != 0);
-                    p.originType = safeText(driver_.column_text(stmt, 14));
+                    p.specificPosition = safeText(driver_.column_text(stmt, 6));
+                    p.specificPositionCode = safeText(driver_.column_text(stmt, 7));
+                    if (p.specificPositionCode.empty()) {
+                        auto tax = domain::resolvePositionTaxonomy(p.positionCode);
+                        p.specificPositionCode = tax.specificCode;
+                        p.specificPosition = tax.specificName;
+                    }
+                    p.jerseyNumber = safeText(driver_.column_text(stmt, 8));
+                    p.convocationsLast20 = driver_.column_int(stmt, 9);
+                    p.matchesPlayed = driver_.column_int(stmt, 10);
+                    p.matchesUnusedSub = driver_.column_int(stmt, 11);
+                    p.totalMinutes = driver_.column_int(stmt, 12);
+                    p.averageRating = driver_.column_double(stmt, 13);
+                    p.currentlyInClub = (driver_.column_int(stmt, 14) != 0);
+                    p.isNewSigning = (driver_.column_int(stmt, 15) != 0);
+                    p.originType = safeText(driver_.column_text(stmt, 16));
                     if (p.originType.empty()) {
                         p.originType = p.isNewSigning ? "YOUTH_OR_EXTERNAL" : "ESTABLISHED";
                     }
-                    p.previousTeamId = driver_.column_int(stmt, 15);
-                    p.previousTeamName = safeText(driver_.column_text(stmt, 16));
-                    p.previousMatchesPlayed = driver_.column_int(stmt, 17);
-                    p.previousAverageRating = driver_.column_double(stmt, 18);
-                    p.previousLeagueStrength = driver_.column_double(stmt, 19);
+                    p.previousTeamId = driver_.column_int(stmt, 17);
+                    p.previousTeamName = safeText(driver_.column_text(stmt, 18));
+                    p.previousMatchesPlayed = driver_.column_int(stmt, 19);
+                    p.previousAverageRating = driver_.column_double(stmt, 20);
+                    p.previousLeagueStrength = driver_.column_double(stmt, 21);
                     if (p.previousLeagueStrength <= 0.0) p.previousLeagueStrength = 1.0;
 
                     auto it = teamIdToIdx.find(p.teamId);

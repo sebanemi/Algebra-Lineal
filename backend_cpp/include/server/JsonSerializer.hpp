@@ -109,6 +109,8 @@ public:
             << "\"short_name\":\"" << escape(pc.player.shortName) << "\","
             << "\"position\":\"" << escape(pc.player.position) << "\","
             << "\"position_code\":\"" << escape(pc.player.positionCode) << "\","
+            << "\"specific_position\":\"" << escape(pc.player.specificPosition) << "\","
+            << "\"specific_position_code\":\"" << escape(pc.player.specificPositionCode) << "\","
             << "\"jersey_number\":\"" << escape(pc.player.jerseyNumber) << "\","
             << "\"convocations\":" << pc.player.convocationsLast20 << ","
             << "\"matches_played\":" << pc.player.matchesPlayed << ","

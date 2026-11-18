@@ -147,28 +147,48 @@ class TuiRenderer:
         players: List[Dict[str, Any]],
     ) -> None:
         """Dibuja una cancha de fútbol en terminal ubicando a los titulares por línea posicional."""
-        gks = [p for p in players if p.get("position_code") == "GK"]
-        defs = [p for p in players if p.get("position_code") == "DEF"]
-        mids = [p for p in players if p.get("position_code") == "MID"]
-        fwds = [p for p in players if p.get("position_code") == "FWD"]
+        horiz_order = {
+            "POR": 0,
+            "LI": 10, "DFC": 20, "LD": 30,
+            "MI": 40, "MCD": 50, "MC": 60, "MCO": 70, "MD": 80,
+            "EI": 90, "SD": 100, "DC": 110, "ED": 120,
+        }
+
+        def sort_line(group: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+            return sorted(
+                group,
+                key=lambda p: (
+                    horiz_order.get(p.get("specific_position_code") or p.get("position_code", ""), 65),
+                    -float(p.get("tactical_score", 0.0)),
+                ),
+            )
+
+        gks = sort_line([p for p in players if p.get("position_code") == "GK"])
+        defs = sort_line([p for p in players if p.get("position_code") == "DEF"])
+        mids = sort_line([p for p in players if p.get("position_code") == "MID"])
+        fwds = sort_line([p for p in players if p.get("position_code") == "FWD"])
 
         def format_tag(p: Dict[str, Any]) -> str:
             num = p.get("jersey_number") or "-"
+            spec = p.get("specific_position_code") or p.get("position_code", "")
             sname = p.get("short_name") or p.get("name", "?")
-            if len(sname) > 13:
-                sname = sname[:12] + "."
+            if len(sname) > 11:
+                sname = sname[:10] + "."
             score = p.get("tactical_score", 0.0)
             new_mark = "★" if p.get("is_new_signing") else ""
-            return f"[{num}]{new_mark}{sname}({score:.1f})"
+            return f"[{num}:{spec}]{new_mark}{sname}({score:.1f})"
 
         def format_line(group: List[Dict[str, Any]], width: int) -> str:
             if not group:
                 return "".center(width)
             tags = [format_tag(p) for p in group]
-            joined = "   ".join(tags)
+            joined = "  ".join(tags)
             if len(joined) > width:
-                tags_short = [f"[{p.get('jersey_number','-')}] {(p.get('short_name') or p.get('name','?'))[:10]}" for p in group]
-                joined = "  ".join(tags_short)
+                tags_short = [
+                    f"[{p.get('jersey_number','-')}:{p.get('specific_position_code') or p.get('position_code','')}] {(p.get('short_name') or p.get('name','?'))[:8]}"
+                    for p in group
+                ]
+                joined = " ".join(tags_short)
             return joined.center(width)
 
         pw = 100
@@ -330,12 +350,14 @@ class TuiRenderer:
     @classmethod
     def render_transfer_simulation_view(cls, res: Dict[str, Any]) -> None:
         sim_p = res["simulated_player"]
+        spec_code = sim_p.get("specific_position_code") or sim_p.get("position_code", "")
+        spec_name = sim_p.get("specific_position") or sim_p.get("position", "")
         cls.section_title(
             f"SIMULACIÓN DE FICHAJE / JUGADOR NUEVO EN EL CLUB: {sim_p['name'].upper()} -> {res['target_team_name'].upper()}"
         )
         print(
             f"  👤 {AnsiStyle.BOLD}Jugador Incorporado:{AnsiStyle.RESET} {AnsiStyle.CYAN}{sim_p['name']}{AnsiStyle.RESET} "
-            f"({sim_p['position']} - {sim_p['position_code']})  │  "
+            f"({sim_p['position_code']}:{spec_code} - {spec_name})  │  "
             f"Origen: {AnsiStyle.YELLOW}{res['source_team_name']}{AnsiStyle.RESET} ({res['source_competition_name']}, λ_orig={res['source_league_strength']:.2f})"
         )
         print(
@@ -416,7 +438,7 @@ class BackendCppClient:
             stderr=subprocess.DEVNULL,
         )
 
-        for _ in range(30):
+        for _ in range(90):
             time.sleep(0.15)
             if self.is_alive():
                 return self.request("/api/status")
@@ -466,16 +488,54 @@ class LpfAnalyticsTuiApp:
             self.refresh_teams(0)
 
         active_teams = self.teams_cache
+        comp_code_map = {
+            72: "LPF",
+            7: "EPL",
+            11: "LALIGA",
+            17: "SERIEA",
+            25: "BUND",
+            35: "LIGUE1",
+            113: "BRAS",
+            73: "PRIM",
+            63: "PRIM",
+            141: "LIGAMX",
+            104: "MLS",
+            572: "UCL",
+            102: "LIBERT",
+        }
         if allow_competition_filter:
+            if not self.competitions_cache:
+                self.refresh_competitions()
+            print(f"\n  {AnsiStyle.BOLD}Filtro de Liga / Competición:{AnsiStyle.RESET}")
             print(
-                f"\n  {AnsiStyle.BOLD}Filtro de Liga / Competición:{AnsiStyle.RESET} "
-                "[Enter = Todas las Ligas | 1 = LPF Argentina | 2 = Ligas Europeas y Brasileirão]"
+                "    [Enter] Todas (245) │ [1] LPF Argentina (72) │ [2] Premier League (7) │ [3] LaLiga (11) │ [4] Serie A (17)"
             )
-            f_choice = input("  👉 Filtro rápido [Enter/1/2]: ").strip()
-            if f_choice == "1":
-                active_teams = [t for t in self.teams_cache if t.get("competition_id") == 72]
-            elif f_choice == "2":
-                active_teams = [t for t in self.teams_cache if t.get("competition_id") != 72]
+            print(
+                "    [5] Bundesliga (25) │ [6] Ligue 1 (35)       │ [7] Brasileirão (113)  │ [8] Primeira Liga (73)"
+            )
+            print(
+                "    [9] Liga MX (141)   │ [10] MLS (104)         │ [11] Champions (572)   │ [12] Libertadores (102)"
+            )
+            f_choice = input("  👉 Elegí Liga [Enter=Todas, 1-12 o código ej. EPL/LALIGA/BRAS]: ").strip().upper()
+            quick_map = {
+                "1": 72, "LPF": 72,
+                "2": 7, "EPL": 7,
+                "3": 11, "LALIGA": 11,
+                "4": 17, "SERIEA": 17,
+                "5": 25, "BUNDESLIGA": 25, "BUND": 25,
+                "6": 35, "LIGUE1": 35,
+                "7": 113, "BRASILEIRAO": 113, "BRAS": 113,
+                "8": 73, "PRIMEIRA": 73, "PRIM": 73,
+                "9": 141, "LIGAMX": 141,
+                "10": 104, "MLS": 104,
+                "11": 572, "UCL": 572,
+                "12": 102, "LIBERTADORES": 102, "LIB": 102,
+            }
+            if f_choice in quick_map:
+                target_cid = quick_map[f_choice]
+                filtered = [t for t in self.teams_cache if t.get("competition_id") == target_cid]
+                if filtered:
+                    active_teams = filtered
 
         TuiRenderer.section_title(f"CATÁLOGO DE EQUIPOS MULTI-LIGA ({len(active_teams)} EQUIPOS DISPONIBLES)")
         cols = 3
@@ -486,8 +546,9 @@ class LpfAnalyticsTuiApp:
                 idx = r + c * rows
                 if idx < len(active_teams):
                     t = active_teams[idx]
-                    comp_tag = "LPF" if t.get("competition_id") == 72 else t.get("competition_name", "")[:6]
-                    entry = f"[{idx + 1:2d}] {t['name'][:17]:<17} ({comp_tag})"
+                    cid_t = int(t.get("competition_id", 72))
+                    comp_tag = comp_code_map.get(cid_t, t.get("competition_name", "")[:6])
+                    entry = f"[{idx + 1:3d}] {t['name'][:16]:<16} ({comp_tag})"
                     line_parts.append(f"{entry:<34}")
             print("  " + " ".join(line_parts))
 
@@ -555,32 +616,40 @@ class LpfAnalyticsTuiApp:
             f"PLANTEL DE {team_name.upper()} (Total: {len(players)} │ Elegibles: {eligible_count} │ Nuevos Cold-Start: {new_signings_count} │ Bajas: {departed_count})"
         )
         print(
-            f" {'#':>2} │ {'Dorsal':>6} │ {'Jugador':<22} │ {'Posición':<11} │ "
-            f"{'Estado / Origen Cold-Start':<22} │ {'PJ/Cv':>5} │ {'α_emp':>5} │ {'Rat.':>4} │ {'Score s_j':>9}"
+            f" {'#':>2} │ {'Dorsal':>6} │ {'Jugador':<22} │ {'Pos (Rol)':<11} │ "
+            f"{'Estado / Origen en el Club':<22} │ {'PJ/Cv':>5} │ {'α_emp':>5} │ {'Rat.':>4} │ {'Score s_j':>9}"
         )
         print("─" * TuiRenderer.WIDTH)
         for idx, p in enumerate(players, start=1):
             in_club = p.get("currently_in_club", True)
             is_new = p.get("is_new_signing", False)
             origin = p.get("origin_type", "ESTABLISHED")
-            prev_team = p.get("previous_team_name", "")
+            prev_team = (p.get("previous_team_name") or "").strip()
             alpha = p.get("adaptation_alpha", 1.0)
+            pj = int(p.get("matches_played", 0))
 
             if not in_club:
-                status_lbl = f"{AnsiStyle.RED}{'BAJA (No Elegible)':<22}{AnsiStyle.RESET}"
+                if prev_team:
+                    tag = f"BAJA (-> {prev_team[:11]})"
+                else:
+                    tag = "BAJA (No Elegible)"
+                status_lbl = f"{AnsiStyle.RED}{tag:<22}{AnsiStyle.RESET}"
             elif is_new and origin == "TRANSFERRED":
-                tag = f"NUEVO(Ex:{prev_team[:10]})"
+                tag = f"NUEVO (Ex:{prev_team[:10] or 'Club Ext.'})"
                 status_lbl = f"{AnsiStyle.MAGENTA}{tag:<22}{AnsiStyle.RESET}"
             elif is_new:
-                status_lbl = f"{AnsiStyle.YELLOW}{'NUEVO(Prior Posic.)':<22}{AnsiStyle.RESET}"
+                status_lbl = f"{AnsiStyle.YELLOW}{'NUEVO (Infer./Ext.)':<22}{AnsiStyle.RESET}"
             elif origin == "TRANSFERRED" and prev_team:
-                tag = f"ACTIVO(Ex:{prev_team[:9]})"
+                tag = f"ACTIVO (Ex:{prev_team[:9]})"
                 status_lbl = f"{AnsiStyle.GREEN}{tag:<22}{AnsiStyle.RESET}"
+            elif pj < 3:
+                status_lbl = f"{AnsiStyle.CYAN}{'ACTIVO (Supl./Rot.)':<22}{AnsiStyle.RESET}"
             else:
                 status_lbl = f"{AnsiStyle.GREEN}{'ACTIVO (Consolidado)':<22}{AnsiStyle.RESET}"
 
-            pj_str = f"{p['matches_played']:2d}/{p['convocations']:2d}"
-            pos_lbl = f"{p['position'][:6]}({p['position_code']})"
+            pj_str = f"{pj:2d}/{p['convocations']:2d}"
+            spec_code = p.get("specific_position_code") or p["position_code"]
+            pos_lbl = f"{p['position_code']:<3} ({spec_code})"
             row_style = "" if in_club else AnsiStyle.DIM
             print(
                 f"{row_style} {idx:2d} │ {p['jersey_number'] or '-':>6} │ {p['name'][:22]:<22} │ "
@@ -711,36 +780,47 @@ class LpfAnalyticsTuiApp:
             f"ONCE INICIAL ÓPTIMO (x*_j = 1) Y SUPLENTES SUGERIDOS (x*_j = 0) - {res['team_name'].upper()} ({res.get('competition_name','')})"
         )
         print(
-            f" {'Rol':<10} │ {'Pos':<4} │ {'Dorsal':>6} │ {'Jugador':<24} │ "
-            f"{'Origen / Estado':<18} │ {'PJ/Cv':>5} │ {'Rating':>6} │ {'Score Lineal s_j':>16}"
+            f" {'Rol':<10} │ {'Pos/Rol':<7} │ {'Dorsal':>6} │ {'Jugador':<23} │ "
+            f"{'Origen / Estado':<18} │ {'PJ/Cv':>5} │ {'Rating':>6} │ {'Score Lineal s_j':>14}"
         )
         print("─" * TuiRenderer.WIDTH)
+
+        def format_origin_label(p: Dict[str, Any]) -> str:
+            prev_team = (p.get("previous_team_name") or "").strip()
+            origin = p.get("origin_type", "ESTABLISHED")
+            pj = int(p.get("matches_played", 0))
+            if p.get("is_new_signing"):
+                if origin == "TRANSFERRED":
+                    return f"Nuevo(Ex:{prev_team[:8] or 'Club'})"
+                return "Nuevo(Infer./Ext.)"
+            if origin == "TRANSFERRED" and prev_team:
+                return f"Ex: {prev_team[:14]}"
+            if pj < 3:
+                return "Supl./Rotación"
+            return "Consolidado"
+
         for p in res["starters"]:
             pj_s = f"{p['matches_played']:2d}/{p['convocations']:2d}"
-            orig_lbl = (
-                f"Nuevo({p.get('previous_team_name','Prior')[:10]})"
-                if p.get("is_new_signing")
-                else "Consolidado"
-            )
+            spec_c = p.get("specific_position_code") or p["position_code"]
+            pos_col = f"{p['position_code']}/{spec_c}"
+            orig_lbl = format_origin_label(p)
             print(
-                f" {AnsiStyle.GREEN}{'TITULAR(1)':<10}{AnsiStyle.RESET} │ {p['position_code']:<4} │ "
-                f"{p['jersey_number'] or '-':>6} │ {AnsiStyle.BOLD}{p['name'][:24]:<24}{AnsiStyle.RESET} │ "
+                f" {AnsiStyle.GREEN}{'TITULAR(1)':<10}{AnsiStyle.RESET} │ {pos_col:<7} │ "
+                f"{p['jersey_number'] or '-':>6} │ {AnsiStyle.BOLD}{p['name'][:23]:<23}{AnsiStyle.RESET} │ "
                 f"{orig_lbl:<18} │ {pj_s:>5} │ {p['average_rating']:6.2f} │ "
-                f"{AnsiStyle.GREEN}{p['tactical_score']:16.2f}{AnsiStyle.RESET}"
+                f"{AnsiStyle.GREEN}{p['tactical_score']:14.2f}{AnsiStyle.RESET}"
             )
         print("─" * TuiRenderer.WIDTH)
         for p in res["bench"]:
             pj_s = f"{p['matches_played']:2d}/{p['convocations']:2d}"
-            orig_lbl = (
-                f"Nuevo({p.get('previous_team_name','Prior')[:10]})"
-                if p.get("is_new_signing")
-                else "Consolidado"
-            )
+            spec_c = p.get("specific_position_code") or p["position_code"]
+            pos_col = f"{p['position_code']}/{spec_c}"
+            orig_lbl = format_origin_label(p)
             print(
-                f" {AnsiStyle.YELLOW}{'BANCO  (0)':<10}{AnsiStyle.RESET} │ {p['position_code']:<4} │ "
-                f"{p['jersey_number'] or '-':>6} │ {p['name'][:24]:<24} │ "
+                f" {AnsiStyle.YELLOW}{'BANCO  (0)':<10}{AnsiStyle.RESET} │ {pos_col:<7} │ "
+                f"{p['jersey_number'] or '-':>6} │ {p['name'][:23]:<23} │ "
                 f"{orig_lbl:<18} │ {pj_s:>5} │ {p['average_rating']:6.2f} │ "
-                f"{AnsiStyle.YELLOW}{p['tactical_score']:16.2f}{AnsiStyle.RESET}"
+                f"{AnsiStyle.YELLOW}{p['tactical_score']:14.2f}{AnsiStyle.RESET}"
             )
         print("─" * TuiRenderer.WIDTH)
 
@@ -878,7 +958,7 @@ class LpfAnalyticsTuiApp:
                 mgr.register_new_player(
                     team_id=target_team["team_id"],
                     player_name=chosen_player["name"],
-                    position_code=chosen_player["position_code"],
+                    position_code=chosen_player.get("specific_position_code") or chosen_player["position_code"],
                     jersey_number=chosen_player.get("jersey_number", ""),
                     prior_rating=chosen_player.get("average_rating", 7.0),
                     previous_team_id=source_team["team_id"],
@@ -889,9 +969,12 @@ class LpfAnalyticsTuiApp:
                 print(f"  {AnsiStyle.GREEN}[OK] {chosen_player['name']} registrado en {target_team['name']} y matriz A_E recargada en C++. {AnsiStyle.RESET}")
         else:
             p_name = input("  👉 Nombre del nuevo jugador (ej. 'Franco Mastantuono' o 'Refuerzo Extranjero'): ").strip() or "Nuevo Refuerzo"
-            print("  Posiciones tácticas: [1] GK (Portero) | [2] DEF (Defensor) | [3] MID (Mediocampista) | [4] FWD (Delantero)")
-            pos_opt = input("  👉 Elegí la posición [1-4, Enter=4]: ").strip() or "4"
-            pos_code = {"1": "GK", "2": "DEF", "3": "MID", "4": "FWD"}.get(pos_opt, "FWD")
+            print("  Posiciones tácticas disponibles:")
+            print("    • GK:  POR (Portero)                     │ • DEF: DFC (Central), LI (Lat. Izq.), LD (Lat. Der.)")
+            print("    • MID: MCD, MC, MCO, MI, MD              │ • FWD: DC (Centrodel.), EI (Ext. Izq.), ED (Ext. Der.), SD (2da Punta)")
+            pos_opt = input("  👉 Ingresá el código de posición (ej: POR, LI, DFC, LD, MCD, MC, MCO, MI, MD, DC, EI, ED, SD) [Enter=DC]: ").strip().upper() or "DC"
+            legacy_map = {"1": "POR", "2": "DFC", "3": "MC", "4": "DC", "GK": "POR", "DEF": "DFC", "MID": "MC", "FWD": "DC"}
+            pos_code = legacy_map.get(pos_opt, pos_opt)
             rat_raw = input("  👉 Valoración previa estimada [5.5 - 9.0, Enter=7.05]: ").strip()
             try:
                 prior_rat = float(rat_raw) if rat_raw else 7.05
@@ -933,6 +1016,7 @@ class LpfAnalyticsTuiApp:
                     jersey_number="99",
                     prior_rating=prior_rat,
                     previous_team_id=0,
+                    previous_league_strength=src_str,
                 )
                 self.client.request("/api/reload")
                 self.refresh_teams(0)
@@ -990,7 +1074,7 @@ class LpfAnalyticsTuiApp:
             elif idx % 4 == 1:
                 self.client.request("/api/predict-matchup", {"team_a_id": tid_a, "team_b_id": tid_b})
             elif idx % 4 == 2:
-                self.client.request("/api/simulate-transfer", {"target_team_id": 866, "source_team_id": 131, "player_id": 90117})
+                self.client.request("/api/simulate-transfer", {"target_team_id": 866, "source_team_id": 131, "player_id": 39820})
             else:
                 self.client.request("/api/team", {"team_id": tid_a})
             return (time.perf_counter() - t0) * 1000.0
@@ -1025,7 +1109,10 @@ class LpfAnalyticsTuiApp:
         # 0. Catálogo Multi-Liga
         self.run_competitions_catalog_view()
 
-        # 1. Demostración de (b): Equipo óptimo de Boca Juniors (866)
+        # 1. Demostración de Plantel y (b): Equipo óptimo de Boca Juniors (866)
+        boca_detail = self.client.request("/api/team", {"team_id": 866, "strategy": "BALANCED"})
+        self.display_squad_table(boca_detail["players"], boca_detail["name"])
+
         opt_boca = self.client.request(
             "/api/optimize-lineup",
             {"team_id": 866, "strategy": "BALANCED", "formation": "AUTO"},
@@ -1049,7 +1136,7 @@ class LpfAnalyticsTuiApp:
             {
                 "target_team_id": 866,
                 "source_team_id": 131,
-                "player_id": 90117,
+                "player_id": 39820,
                 "strategy": "OFFENSIVE",
                 "formation": "4-3-3",
             },

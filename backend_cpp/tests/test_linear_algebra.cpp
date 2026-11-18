@@ -49,9 +49,9 @@ void testDatabaseAndLinearModels() {
     auto lpfModels = engine->getAllTeamModels(72);
     assert(lpfModels.size() == 30);
 
-    // Y además los equipos internacionales preconfigurados (LaLiga, Premier League, Serie A, Bundesliga, Brasileirão)
+    // Y además todos los clubes de las 12 ligas y competiciones requeridas (245 equipos en total)
     auto allModels = engine->getAllTeamModels();
-    assert(allModels.size() >= 38);
+    assert(allModels.size() >= 240);
 
     for (const auto& model : allModels) {
         const auto& A = model.transformationMatrix();
@@ -60,11 +60,39 @@ void testDatabaseAndLinearModels() {
         assert(model.team().matches.size() == 20);
         assert(model.frobeniusResidual() > 0.0);
 
-        auto optTeam = engine->optimizeLineup(model.team().teamId, "BALANCED", "AUTO");
+        for (const auto& p : model.team().squad) {
+            assert(p.averageRating > 1.0);
+            assert(!p.specificPosition.empty());
+            assert(!p.specificPositionCode.empty());
+            if (p.positionCode == "GK") {
+                assert(p.specificPositionCode == "POR");
+            } else if (p.positionCode == "DEF") {
+                assert(p.specificPositionCode == "DFC" || p.specificPositionCode == "LI" || p.specificPositionCode == "LD");
+            } else if (p.positionCode == "MID") {
+                assert(p.specificPositionCode == "MCD" || p.specificPositionCode == "MC" ||
+                       p.specificPositionCode == "MCO" || p.specificPositionCode == "MI" ||
+                       p.specificPositionCode == "MD");
+            } else if (p.positionCode == "FWD") {
+                assert(p.specificPositionCode == "DC" || p.specificPositionCode == "EI" ||
+                       p.specificPositionCode == "ED" || p.specificPositionCode == "SD");
+            }
+            if (p.matchesPlayed >= 3) {
+                assert(std::abs(p.adaptationAlpha - 1.0) < 1e-6);
+            } else {
+                assert(p.adaptationAlpha >= 0.0 && p.adaptationAlpha < 0.50);
+            }
+        }
+
+        auto optTeam = engine->optimizeLineup(model.team().teamId, "BALANCED", "4-3-3");
         assert(optTeam.optimalStarters.size() == 11);
+        int countLI = 0, countDFC = 0, countLD = 0;
         for (const auto& starter : optTeam.optimalStarters) {
             assert(starter.player.currentlyInClub == true);
+            if (starter.player.specificPositionCode == "LI") countLI++;
+            if (starter.player.specificPositionCode == "DFC") countDFC++;
+            if (starter.player.specificPositionCode == "LD") countLD++;
         }
+        assert(countLI >= 1 && countDFC >= 2 && countLD >= 1);
         for (const auto& sub : optTeam.recommendedBench) {
             assert(sub.player.currentlyInClub == true);
         }
@@ -99,17 +127,17 @@ void testColdStartNewPlayerAndTransfers() {
     auto repo = std::make_shared<repository::SqliteRepository>("data/lpf_analytics.db");
     auto engine = std::make_shared<services::AnalyticsEngineService>(repo, 1.35);
 
-    // 1. Verificar jugador nuevo transferido entre clubes de la BD (Thiago Almada ID 60282: River Plate -> Manchester City con 0 PJ en City)
+    // 1. Verificar jugador nuevo transferido entre clubes de la BD (Enzo Fernández ID 74559: Chelsea -> Manchester City con 0 PJ en City)
     const auto& cityModel = engine->getTeamModel(110);
     bool foundTransferred = false;
     for (std::size_t j = 0; j < cityModel.team().squad.size(); ++j) {
         const auto& p = cityModel.team().squad[j];
-        if (p.playerId == 60282) { // Thiago Almada
+        if (p.playerId == 74559) { // Enzo Fernández
             foundTransferred = true;
             assert(p.matchesPlayed == 0);
             assert(p.isNewSigning == true);
             assert(p.originType == "TRANSFERRED");
-            assert(p.previousTeamId == 868); // River Plate
+            assert(p.previousTeamId == 106); // Chelsea
             assert(std::abs(p.adaptationAlpha - 0.0) < 1e-6);
 
             auto col = cityModel.transformationMatrix().getColumn(j);
@@ -121,12 +149,12 @@ void testColdStartNewPlayerAndTransfers() {
     }
     assert(foundTransferred == true);
 
-    // 2. Verificar jugador nuevo debutante / externo con 0 PJ sin club previo en BD (Joan Martínez en Real Madrid, ID 90121)
+    // 2. Verificar jugador nuevo debutante / externo con 0 PJ sin club previo en BD (Raúl Asencio en Real Madrid, ID 104648)
     const auto& madridModel = engine->getTeamModel(131);
     bool foundDebutant = false;
     for (std::size_t j = 0; j < madridModel.team().squad.size(); ++j) {
         const auto& p = madridModel.team().squad[j];
-        if (p.playerId == 90121) {
+        if (p.playerId == 104648) {
             foundDebutant = true;
             assert(p.matchesPlayed == 0);
             assert(p.isNewSigning == true);
@@ -141,7 +169,7 @@ void testColdStartNewPlayerAndTransfers() {
     assert(foundDebutant == true);
 
     // 3. Probar Simulador de Fichajes Inter-Liga (ej: ¿Qué pasa si Boca Juniors ficha a Kylian Mbappé del Real Madrid?)
-    auto simTransfer = engine->simulateTransfer(866, 131, 90117, 0, "OFFENSIVE", "4-3-3");
+    auto simTransfer = engine->simulateTransfer(866, 131, 39820, 0, "OFFENSIVE", "4-3-3");
     assert(simTransfer.targetTeamId == 866);
     assert(simTransfer.sourceTeamId == 131);
     assert(simTransfer.leagueScalingRatio > 1.0); // LaLiga (1.26) -> LPF (1.00)
@@ -149,11 +177,29 @@ void testColdStartNewPlayerAndTransfers() {
     assert(simTransfer.postTransferStarters.size() == 11);
     assert(simTransfer.postTransferMetrics[domain::GOLES_A_FAVOR] >= simTransfer.baselineMetrics[domain::GOLES_A_FAVOR]);
 
-    // 4. Probar Simulador de Incorporación de un Jugador Nuevo Externo / Inferiores (sin club origen en BD)
-    auto simYouth = engine->simulateTransfer(868, 0, 0, 0, "BALANCED", "4-3-3", "Juvenil Promesa", "FWD", 7.15, 1.00);
+    // 4. Probar Simulador de Incorporación de un Jugador Nuevo Externo / Inferiores con sub-posición específica (MCO)
+    auto simYouth = engine->simulateTransfer(868, 0, 0, 0, "BALANCED", "4-3-3", "Juvenil Promesa", "MCO", 7.15, 1.00);
     assert(simYouth.targetTeamId == 868);
     assert(simYouth.simulatedPlayer.originType == "YOUTH_OR_EXTERNAL");
+    assert(simYouth.simulatedPlayer.positionCode == "MID");
+    assert(simYouth.simulatedPlayer.specificPositionCode == "MCO");
     assert(simYouth.injectedColumnVector[domain::TIROS_AL_ARCO] > 0.05);
+
+    // 4b. Verificar trazabilidad de transferencia en jugador ya consolidado (Álvaro Montero ID 27686 en Boca Juniors: Vélez -> Boca)
+    const auto& bocaModel = engine->getTeamModel(866);
+    bool foundConsolidatedTransfer = false;
+    for (const auto& p : bocaModel.team().squad) {
+        if (p.playerId == 27686) { // Álvaro Montero
+            foundConsolidatedTransfer = true;
+            assert(p.currentlyInClub == true);
+            assert(p.matchesPlayed >= 3);
+            assert(p.isNewSigning == false);
+            assert(p.originType == "TRANSFERRED");
+            assert(p.previousTeamId == 872); // Vélez Sarsfield
+            break;
+        }
+    }
+    assert(foundConsolidatedTransfer == true);
 
     // 5. Probar Predicción Inter-Liga (Real Madrid vs River Plate)
     auto interMatch = engine->predictMatchup(131, 868, {}, {}, "BALANCED", "4-3-3", "4-3-3", true);
@@ -184,7 +230,7 @@ void testConcurrentMultiUserQueries() {
                 auto r = engine->predictMatchup(131, 868); // Real Madrid vs River Plate
                 if (r.expectedGoalsA > 0.0 && r.expectedGoalsB > 0.0) successCount.fetch_add(1);
             } else if (i % 4 == 2) {
-                auto r = engine->simulateTransfer(866, 110, 90316); // Haaland -> Boca Juniors
+                auto r = engine->simulateTransfer(866, 110, 65760); // Haaland -> Boca Juniors
                 if (r.postTransferStarters.size() == 11) successCount.fetch_add(1);
             } else {
                 auto r = engine->optimizeLineup(132, "POSSESSION", "4-3-3"); // FC Barcelona

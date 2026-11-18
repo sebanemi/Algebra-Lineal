@@ -47,10 +47,54 @@ private:
     math::Matrix empiricalMatrixA_;    // A_emp = A_0 + Delta_A in R^(20 x n)
     math::Matrix transformationMatrix_;// A_E final con resolución Cold-Start in R^(20 x n)
     MatchMetrics historicalAverage_;   // Promedio histórico en R^20
-    std::unordered_map<std::string, std::vector<double>> positionalPriors_; // GK, DEF, MID, FWD -> R^20
+    std::unordered_map<std::string, std::vector<double>> positionalPriors_;         // GK, DEF, MID, FWD -> R^20
+    std::unordered_map<std::string, std::vector<double>> specificPositionalPriors_; // POR, DFC, LI, LD, MCD, MC, MCO, MI, MD, DC, EI, ED, SD -> R^20
     double meanSquadRating_ = 6.75;
     double frobeniusResidual_ = 0.0;
     double rSquared_ = 0.0;
+
+    static double subPositionMetricMultiplier(const std::string& specCode, std::size_t metricIdx) {
+        if (specCode == "LI" || specCode == "LD") {
+            if (metricIdx == CORNERS || metricIdx == PASES || metricIdx == TOQUES_AREA_RIVAL || metricIdx == RECUPERACIONES) return 1.04;
+            if (metricIdx == DESPEJES) return 0.96;
+        } else if (specCode == "DFC") {
+            if (metricIdx == DESPEJES || metricIdx == TACLES || metricIdx == INTERCEPCIONES) return 1.05;
+            if (metricIdx == GOLES_EN_CONTRA || metricIdx == TIROS_RIVAL_AL_ARCO) return 0.96;
+        } else if (specCode == "MCD") {
+            if (metricIdx == TACLES || metricIdx == INTERCEPCIONES || metricIdx == RECUPERACIONES || metricIdx == PASES) return 1.05;
+            if (metricIdx == GOLES_EN_CONTRA || metricIdx == TIROS_RIVAL_AL_ARCO) return 0.96;
+        } else if (specCode == "MC") {
+            if (metricIdx == PASES || metricIdx == POSESION || metricIdx == RECUPERACIONES) return 1.04;
+        } else if (specCode == "MCO") {
+            if (metricIdx == GOLES_A_FAVOR || metricIdx == TIROS_AL_ARCO || metricIdx == TOQUES_AREA_RIVAL || metricIdx == TIROS_LIBRES || metricIdx == PASES) return 1.05;
+        } else if (specCode == "MI" || specCode == "MD") {
+            if (metricIdx == CORNERS || metricIdx == TOQUES_AREA_RIVAL || metricIdx == TIROS || metricIdx == RECUPERACIONES) return 1.04;
+        } else if (specCode == "DC") {
+            if (metricIdx == GOLES_A_FAVOR || metricIdx == TIROS_AL_ARCO || metricIdx == TIROS || metricIdx == TOQUES_AREA_RIVAL) return 1.06;
+        } else if (specCode == "EI" || specCode == "ED") {
+            if (metricIdx == CORNERS || metricIdx == TOQUES_AREA_RIVAL || metricIdx == TIROS_AL_ARCO || metricIdx == TIROS_LIBRES) return 1.05;
+        } else if (specCode == "SD") {
+            if (metricIdx == GOLES_A_FAVOR || metricIdx == TIROS_AL_ARCO || metricIdx == PASES || metricIdx == TOQUES_AREA_RIVAL) return 1.05;
+        }
+        return 1.00;
+    }
+
+    static int tacticalHorizontalOrder(const std::string& specCode) {
+        if (specCode == "POR") return 0;
+        if (specCode == "LI")  return 10;
+        if (specCode == "DFC") return 20;
+        if (specCode == "LD")  return 30;
+        if (specCode == "MI")  return 40;
+        if (specCode == "MCD") return 50;
+        if (specCode == "MC")  return 60;
+        if (specCode == "MCO") return 70;
+        if (specCode == "MD")  return 80;
+        if (specCode == "EI")  return 90;
+        if (specCode == "SD")  return 100;
+        if (specCode == "DC")  return 110;
+        if (specCode == "ED")  return 120;
+        return 65;
+    }
 
 public:
     TeamTransformationModel() = default;
@@ -84,16 +128,30 @@ public:
 
     /**
      * @brief Devuelve el vector Prior Posicional a_bar_P in R^20 para la línea táctica
-     *        indicada (GK, DEF, MID, FWD) en este club.
+     *        (GK, DEF, MID, FWD) o sub-posición específica (POR, DFC, LI, LD, MCD, MC,
+     *        MCO, MI, MD, DC, EI, ED, SD) en este club.
      */
     std::vector<double> getPositionalPrior(const std::string& positionCode) const {
+        auto specIt = specificPositionalPriors_.find(positionCode);
+        if (specIt != specificPositionalPriors_.end()) {
+            return specIt->second;
+        }
         auto it = positionalPriors_.find(positionCode);
         if (it != positionalPriors_.end()) {
             return it->second;
         }
+        auto tax = resolvePositionTaxonomy(positionCode);
+        auto macroIt = positionalPriors_.find(tax.macroCode);
+        if (macroIt != positionalPriors_.end()) {
+            std::vector<double> adapted = macroIt->second;
+            for (std::size_t i = 0; i < NUM_METRICS; ++i) {
+                adapted[i] *= subPositionMetricMultiplier(tax.specificCode, i);
+            }
+            return adapted;
+        }
         std::vector<double> fallback(NUM_METRICS, 0.0);
         for (std::size_t i = 0; i < NUM_METRICS; ++i) {
-            fallback[i] = historicalAverage_[i] / 11.0;
+            fallback[i] = (historicalAverage_[i] / 11.0) * subPositionMetricMultiplier(tax.specificCode, i);
         }
         return fallback;
     }
@@ -189,19 +247,26 @@ public:
 
         std::size_t j = it->second;
         Player& p = team_.squad[j];
-        double priorRat = (p.previousAverageRating > 1.0) ? p.previousAverageRating : p.averageRating;
+        double priorRat = (p.previousAverageRating > 1.0) ? p.previousAverageRating
+                        : (p.averageRating > 1.0) ? p.averageRating
+                        : meanSquadRating_;
+        if (p.averageRating <= 1.0) {
+            p.averageRating = priorRat;
+        }
+        const std::string& effPosCode = !p.specificPositionCode.empty() ? p.specificPositionCode : p.positionCode;
         std::vector<double> transferPrior = synthesizeNewPlayerColumn(
-            p.positionCode, priorRat, sourceLeagueStrength, sourceCol, sourcePosBaseline
+            effPosCode, priorRat, sourceLeagueStrength, sourceCol, sourcePosBaseline
         );
 
         double pj = static_cast<double>(p.matchesPlayed);
-        double alpha = pj / (pj + 3.0); // Peso de adaptación empírica en el nuevo club
+        double alpha = (p.matchesPlayed < 3) ? (pj / (pj + 3.0)) : 1.0;
         p.adaptationAlpha = alpha;
 
         for (std::size_t i = 0; i < NUM_METRICS; ++i) {
             double empVal = empiricalMatrixA_(i, j);
             transformationMatrix_(i, j) = (1.0 - alpha) * transferPrior[i] + alpha * empVal;
         }
+        recomputeFitMetrics();
     }
 
     /**
@@ -228,9 +293,10 @@ public:
         double matchesFactor = std::min(1.0, effectiveMatches / 20.0);
         double minutesFactor = std::min(1.0, effectiveMinutes / 1100.0);
 
-        double refRating = (p.matchesPlayed > 0) ? p.averageRating
+        double refRating = (p.matchesPlayed > 0 && p.averageRating > 1.0) ? p.averageRating
                          : (p.previousAverageRating > 1.0) ? p.previousAverageRating
-                         : p.averageRating;
+                         : (p.averageRating > 1.0) ? p.averageRating
+                         : meanSquadRating_;
         double ratingBonus = (refRating - 6.65) * 4.5;
 
         if (effectiveMatches < 3.0) {
@@ -367,6 +433,37 @@ public:
         std::sort(mids.begin(), mids.end(), sortByScoreDesc);
         std::sort(fwds.begin(), fwds.end(), sortByScoreDesc);
 
+        auto selectBalancedLine = [&](const std::vector<std::size_t>& sortedPool,
+                                      int requiredCount,
+                                      const std::vector<std::string>& preferredSubRoles) {
+            std::vector<std::size_t> selected;
+            std::vector<bool> used(sortedPool.size(), false);
+
+            for (const auto& role : preferredSubRoles) {
+                if (static_cast<int>(selected.size()) >= requiredCount) break;
+                for (std::size_t k = 0; k < sortedPool.size(); ++k) {
+                    if (!used[k] && team_.squad[sortedPool[k]].specificPositionCode == role) {
+                        used[k] = true;
+                        selected.push_back(sortedPool[k]);
+                        break;
+                    }
+                }
+            }
+            for (std::size_t k = 0; k < sortedPool.size() && static_cast<int>(selected.size()) < requiredCount; ++k) {
+                if (!used[k]) {
+                    used[k] = true;
+                    selected.push_back(sortedPool[k]);
+                }
+            }
+            std::sort(selected.begin(), selected.end(), [&](std::size_t a, std::size_t b) {
+                int ordA = tacticalHorizontalOrder(team_.squad[a].specificPositionCode);
+                int ordB = tacticalHorizontalOrder(team_.squad[b].specificPositionCode);
+                if (ordA != ordB) return ordA < ordB;
+                return allContributions[a].tacticalScore > allContributions[b].tacticalScore;
+            });
+            return selected;
+        };
+
         OptimalLineupResult bestResult;
         double bestFormationScore = -1e18;
 
@@ -378,11 +475,30 @@ public:
                 continue;
             }
 
+            std::vector<std::string> defRoles;
+            if (form.defenders == 4) defRoles = {"LI", "DFC", "DFC", "LD"};
+            else if (form.defenders == 5) defRoles = {"LI", "DFC", "DFC", "DFC", "LD"};
+            else if (form.defenders == 3) defRoles = {"DFC", "DFC"};
+
+            std::vector<std::string> midRoles;
+            if (form.midfielders == 3) midRoles = {"MCD", "MC", "MCO"};
+            else if (form.midfielders == 4) midRoles = {"MCD", "MC", "MCO"};
+            else if (form.midfielders == 5) midRoles = {"MI", "MCD", "MC", "MCO", "MD"};
+
+            std::vector<std::string> fwdRoles;
+            if (form.forwards == 3) fwdRoles = {"EI", "DC", "ED"};
+            else if (form.forwards == 2) fwdRoles = {"DC"};
+            else if (form.forwards == 1) fwdRoles = {"DC"};
+
+            std::vector<std::size_t> chosenDefs = selectBalancedLine(defs, form.defenders, defRoles);
+            std::vector<std::size_t> chosenMids = selectBalancedLine(mids, form.midfielders, midRoles);
+            std::vector<std::size_t> chosenFwds = selectBalancedLine(fwds, form.forwards, fwdRoles);
+
             std::vector<std::size_t> chosenIndices;
             chosenIndices.push_back(gks[0]);
-            for (int i = 0; i < form.defenders; ++i) chosenIndices.push_back(defs[i]);
-            for (int i = 0; i < form.midfielders; ++i) chosenIndices.push_back(mids[i]);
-            for (int i = 0; i < form.forwards; ++i) chosenIndices.push_back(fwds[i]);
+            chosenIndices.insert(chosenIndices.end(), chosenDefs.begin(), chosenDefs.end());
+            chosenIndices.insert(chosenIndices.end(), chosenMids.begin(), chosenMids.end());
+            chosenIndices.insert(chosenIndices.end(), chosenFwds.begin(), chosenFwds.end());
 
             std::vector<int> chosenPids;
             double sumPlayerScores = 0.0;
@@ -481,9 +597,43 @@ private:
             playerIdToIndex_[team_.squad[j].playerId] = j;
         }
 
-        if (n == 0 || m == 0) {
+        if (n == 0) {
+            empiricalMatrixA_ = math::Matrix(NUM_METRICS, 0, 0.0);
+            transformationMatrix_ = math::Matrix(NUM_METRICS, 0, 0.0);
+            return;
+        }
+
+        if (m == 0) {
+            // Fallback seguro para equipos sin partidos registrados aún: inicializar con priors canónicos
+            const std::array<double, NUM_METRICS> canonicalDefaults = {
+                1.35, 1.10, 4.50, 50.0, 2.80, 5.20, 11.5, 420.0, 12.0, 2.10,
+                0.08, 6.80, 12.5, 18.0, 1.80, 15.5, 9.20, 48.0, 16.0, 3.90
+            };
+            for (std::size_t i = 0; i < NUM_METRICS; ++i) {
+                historicalAverage_[i] = canonicalDefaults[i];
+            }
+            meanSquadRating_ = 6.80;
+            for (const auto& code : std::array<std::string, 4>{"GK", "DEF", "MID", "FWD"}) {
+                std::vector<double> col(NUM_METRICS, 0.0);
+                for (std::size_t i = 0; i < NUM_METRICS; ++i) col[i] = historicalAverage_[i] / 11.0;
+                positionalPriors_[code] = std::move(col);
+            }
             empiricalMatrixA_ = math::Matrix(NUM_METRICS, n, 0.0);
             transformationMatrix_ = math::Matrix(NUM_METRICS, n, 0.0);
+            for (std::size_t j = 0; j < n; ++j) {
+                Player& p = team_.squad[j];
+                if (p.averageRating <= 1.0) {
+                    p.averageRating = (p.previousAverageRating > 1.0) ? p.previousAverageRating : meanSquadRating_;
+                }
+                p.adaptationAlpha = 0.0;
+                auto col = synthesizeNewPlayerColumn(p.positionCode, p.averageRating, team_.strengthFactor);
+                for (std::size_t i = 0; i < NUM_METRICS; ++i) {
+                    empiricalMatrixA_(i, j) = col[i];
+                    transformationMatrix_(i, j) = col[i];
+                }
+            }
+            frobeniusResidual_ = 0.0;
+            rSquared_ = 1.0;
             return;
         }
 
@@ -527,23 +677,29 @@ private:
         double sumRatings = 0.0;
         int ratedCount = 0;
         for (const auto& p : team_.squad) {
-            if (p.matchesPlayed > 0 && p.averageRating > 0.0) {
+            if (p.matchesPlayed > 0 && p.averageRating > 1.0) {
                 sumRatings += p.averageRating;
                 ratedCount++;
             }
         }
         meanSquadRating_ = (ratedCount > 0) ? (sumRatings / ratedCount) : 6.75;
 
+        for (auto& p : team_.squad) {
+            if (p.averageRating <= 1.0) {
+                p.averageRating = (p.previousAverageRating > 1.0) ? p.previousAverageRating : meanSquadRating_;
+            }
+        }
+
         // 1. Construir matriz base canónica A_0 in R^(20 x n)
         math::Matrix A0(NUM_METRICS, n, 0.0);
         for (std::size_t j = 0; j < n; ++j) {
             const Player& p = team_.squad[j];
             double reliability = static_cast<double>(p.matchesPlayed) / (p.matchesPlayed + 4.0);
-            double ratingDiff = (p.matchesPlayed > 0) ? (p.averageRating - meanSquadRating_) : 0.0;
+            double ratingDiff = (p.matchesPlayed > 0 && p.averageRating > 1.0) ? (p.averageRating - meanSquadRating_) : 0.0;
             double modFactor = 1.0 + 0.12 * reliability * ratingDiff;
 
             for (std::size_t i = 0; i < NUM_METRICS; ++i) {
-                double baseShare = historicalAverage_[i] / 11.0;
+                double baseShare = (historicalAverage_[i] / 11.0) * subPositionMetricMultiplier(p.specificPositionCode, i);
                 if (i == PROMEDIO_VALORACION) {
                     double playerRat = (p.matchesPlayed > 0 && p.averageRating > 0.0)
                                        ? p.averageRating
@@ -580,6 +736,7 @@ private:
         transformationMatrix_ = empiricalMatrixA_;
 
         // 5. Calcular los vectores Prior Posicionales a_bar_P in R^20 por línea táctica (GK, DEF, MID, FWD)
+        //    y por sub-posición específica (POR, DFC, LI, LD, MCD, MC, MCO, MI, MD, DC, EI, ED, SD),
         //    promediando ponderadamente por continuidad a los jugadores establecidos (PJ >= 3).
         const std::array<std::string, 4> posCodes = {"GK", "DEF", "MID", "FWD"};
         for (const auto& code : posCodes) {
@@ -607,27 +764,74 @@ private:
             positionalPriors_[code] = std::move(sumCol);
         }
 
+        const std::array<std::string, 13> specCodes = {
+            "POR", "DFC", "LI", "LD", "MCD", "MC", "MCO", "MI", "MD", "DC", "EI", "ED", "SD"
+        };
+        for (const auto& scode : specCodes) {
+            auto tax = resolvePositionTaxonomy(scode);
+            const auto& macroPrior = positionalPriors_[tax.macroCode];
+            std::vector<double> sumCol(NUM_METRICS, 0.0);
+            double totalWeight = 0.0;
+            for (std::size_t j = 0; j < n; ++j) {
+                const Player& p = team_.squad[j];
+                if (p.specificPositionCode == scode && p.matchesPlayed >= 3) {
+                    double w = static_cast<double>(p.matchesPlayed);
+                    for (std::size_t i = 0; i < NUM_METRICS; ++i) {
+                        sumCol[i] += w * empiricalMatrixA_(i, j);
+                    }
+                    totalWeight += w;
+                }
+            }
+            if (totalWeight > 0.0) {
+                for (std::size_t i = 0; i < NUM_METRICS; ++i) {
+                    double empMean = sumCol[i] / totalWeight;
+                    double modMacro = macroPrior[i] * subPositionMetricMultiplier(scode, i);
+                    sumCol[i] = 0.70 * empMean + 0.30 * modMacro;
+                }
+            } else {
+                for (std::size_t i = 0; i < NUM_METRICS; ++i) {
+                    sumCol[i] = macroPrior[i] * subPositionMetricMultiplier(scode, i);
+                }
+            }
+            specificPositionalPriors_[scode] = std::move(sumCol);
+        }
+
         // 6. Aplicar Resolución Cold-Start Híbrida para jugadores nuevos en el club (PJ < 3):
         //    A_E(., j) = (1 - alpha_j) * a_j^prior + alpha_j * A_emp(., j)
         for (std::size_t j = 0; j < n; ++j) {
             Player& p = team_.squad[j];
             double pj = static_cast<double>(p.matchesPlayed);
-            double alpha = pj / (pj + 3.0);
-            p.adaptationAlpha = alpha;
 
             if (p.matchesPlayed < 3) {
-                double priorRat = (p.previousAverageRating > 1.0) ? p.previousAverageRating : p.averageRating;
+                double alpha = pj / (pj + 3.0);
+                p.adaptationAlpha = alpha;
+                double priorRat = (p.previousAverageRating > 1.0) ? p.previousAverageRating
+                                : (p.averageRating > 1.0) ? p.averageRating
+                                : meanSquadRating_;
                 double srcLeague = (p.previousLeagueStrength > 0.1) ? p.previousLeagueStrength : team_.strengthFactor;
+                const std::string& effPosCode = !p.specificPositionCode.empty() ? p.specificPositionCode : p.positionCode;
                 std::vector<double> priorCol = synthesizeNewPlayerColumn(
-                    p.positionCode, priorRat, srcLeague
+                    effPosCode, priorRat, srcLeague
                 );
                 for (std::size_t i = 0; i < NUM_METRICS; ++i) {
                     transformationMatrix_(i, j) = (1.0 - alpha) * priorCol[i] + alpha * empiricalMatrixA_(i, j);
                 }
+            } else {
+                p.adaptationAlpha = 1.0;
             }
         }
 
         // 7. Métricas de bondad de ajuste matricial sobre los partidos jugados (Norma de Frobenius y R^2)
+        recomputeFitMetrics();
+    }
+
+    void recomputeFitMetrics() {
+        const std::size_t m = team_.matches.size();
+        if (m == 0 || normalizedMatrixX_.cols() == 0) {
+            frobeniusResidual_ = 0.0;
+            rSquared_ = 1.0;
+            return;
+        }
         math::Matrix Y_hat = transformationMatrix_ * normalizedMatrixX_;
         math::Matrix residualMat = metricsMatrixY_ - Y_hat;
         frobeniusResidual_ = residualMat.frobeniusNorm();

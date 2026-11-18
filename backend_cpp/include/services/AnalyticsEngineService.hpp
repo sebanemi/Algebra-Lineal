@@ -65,16 +65,17 @@ public:
             ids.push_back(t.teamId);
         }
 
-        // Pasada 2: Transferencia Matricial Inter-Club para jugadores nuevos con historial en otro club de la BD
+        // Pasada 2: Transferencia Matricial Inter-Club para jugadores nuevos activos con historial en otro club de la BD
         for (auto& kv : newModels) {
             auto& targetModel = kv.second;
             for (const auto& p : targetModel.team().squad) {
-                if (p.matchesPlayed < 5 && p.previousTeamId > 0) {
+                if (p.currentlyInClub && p.matchesPlayed < 3 && p.previousTeamId > 0) {
                     auto srcIt = newModels.find(p.previousTeamId);
                     if (srcIt != newModels.end() && srcIt->second.hasPlayer(p.playerId)) {
                         const auto& srcModel = srcIt->second;
                         std::vector<double> srcCol = srcModel.getPlayerColumn(p.playerId);
-                        std::vector<double> srcPosPrior = srcModel.getPositionalPrior(p.positionCode);
+                        const std::string& effPosCode = !p.specificPositionCode.empty() ? p.specificPositionCode : p.positionCode;
+                        std::vector<double> srcPosPrior = srcModel.getPositionalPrior(effPosCode);
                         targetModel.applyCrossClubTransferVector(
                             p.playerId,
                             srcCol,
@@ -429,7 +430,8 @@ public:
             }
 
             sourceCol = srcModel.getPlayerColumn(playerId);
-            sourcePosPrior = srcModel.getPositionalPrior(simPlayer.positionCode);
+            const std::string& srcEffPos = !simPlayer.specificPositionCode.empty() ? simPlayer.specificPositionCode : simPlayer.positionCode;
+            sourcePosPrior = srcModel.getPositionalPrior(srcEffPos);
 
             simPlayer.previousTeamId = srcModel.team().teamId;
             simPlayer.previousTeamName = srcModel.team().name;
@@ -451,20 +453,16 @@ public:
             res.sourceCompetitionName = "Prior Posicional del Club";
             res.sourceLeagueStrength = srcStrength;
 
-            std::string posCode = customPositionCode;
-            if (posCode != "GK" && posCode != "DEF" && posCode != "MID" && posCode != "FWD") {
-                posCode = "FWD";
-            }
-            std::string posFull = (posCode == "GK") ? "Portero"
-                                : (posCode == "DEF") ? "Defensor"
-                                : (posCode == "MID") ? "Mediocampista" : "Delantero";
+            auto tax = domain::resolvePositionTaxonomy(customPositionCode);
 
             simPlayer.playerId = 999001;
             simPlayer.teamId = targetModel.team().teamId;
             simPlayer.name = customPlayerName.empty() ? "Nuevo Jugador" : customPlayerName;
             simPlayer.shortName = simPlayer.name;
-            simPlayer.position = posFull;
-            simPlayer.positionCode = posCode;
+            simPlayer.position = tax.macroName;
+            simPlayer.positionCode = tax.macroCode;
+            simPlayer.specificPosition = tax.specificName;
+            simPlayer.specificPositionCode = tax.specificCode;
             simPlayer.jerseyNumber = "99";
             simPlayer.convocationsLast20 = 0;
             simPlayer.matchesPlayed = 0;
@@ -479,7 +477,8 @@ public:
         }
 
         // 2. Sintetizar el vector columna a_new in R^20 en el espacio del club destino
-        res.positionalPriorVector = targetModel.getPositionalPrior(simPlayer.positionCode);
+        const std::string& simEffPos = !simPlayer.specificPositionCode.empty() ? simPlayer.specificPositionCode : simPlayer.positionCode;
+        res.positionalPriorVector = targetModel.getPositionalPrior(simEffPos);
         res.sourceDifferentialVec.assign(domain::NUM_METRICS, 0.0);
         if (!sourceCol.empty() && sourcePosPrior.size() == domain::NUM_METRICS) {
             for (std::size_t i = 0; i < domain::NUM_METRICS; ++i) {
@@ -488,7 +487,7 @@ public:
         }
 
         res.injectedColumnVector = targetModel.synthesizeNewPlayerColumn(
-            simPlayer.positionCode,
+            simEffPos,
             simPlayer.averageRating,
             srcStrength,
             sourceCol,
@@ -504,7 +503,7 @@ public:
             simPlayer, res.injectedColumnVector, *strategy
         );
 
-        // 3. Determinar a qué titular reemplaza en el 11 (por ID explícito o el de menor score de su misma línea)
+        // 3. Determinar a qué titular reemplaza en el 11 (por ID explícito, misma sub-posición o misma línea)
         std::size_t replaceIdxInStarters = 0;
         bool foundReplace = false;
         if (replacePlayerId > 0) {
@@ -513,6 +512,17 @@ public:
                     replaceIdxInStarters = idx;
                     foundReplace = true;
                     break;
+                }
+            }
+        }
+        if (!foundReplace && !simPlayer.specificPositionCode.empty()) {
+            double minSpecScore = 1e18;
+            for (std::size_t idx = 0; idx < baseOpt.optimalStarters.size(); ++idx) {
+                const auto& st = baseOpt.optimalStarters[idx];
+                if (st.player.specificPositionCode == simPlayer.specificPositionCode && st.tacticalScore < minSpecScore) {
+                    minSpecScore = st.tacticalScore;
+                    replaceIdxInStarters = idx;
+                    foundReplace = true;
                 }
             }
         }
